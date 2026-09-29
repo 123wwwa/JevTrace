@@ -1,3 +1,5 @@
+<img alt="JevTrace — compiler-guided context for TypeScript/JavaScript" src="assets/logo-banner.webp" width="960">
+
 <a href="docs/benchmark-vs-jevgrep.md">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-vs-jevgrep-dark.svg">
