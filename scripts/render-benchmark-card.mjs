@@ -30,57 +30,48 @@ const themes = {
   dark: { bg: '#1a1a19', ink: '#ffffff', ink2: '#c3c2b7', muted: '#898781', grid: '#2c2c2a', ours: '#3987e5', theirs: '#5b5a55', border: 'rgba(255,255,255,0.10)' },
 };
 
+// One big number per metric and a pair of bars; everything else lives in the linked document.
 const panels = [
-  { title: 'Required code delivered', note: 'higher is better', ours: ours.recall, theirs: theirs.recall,
-    format: value => `${(value * 100).toFixed(1)}%`, max: 1, callout: `+${((ours.recall - theirs.recall) * 100).toFixed(1)} pts` },
-  { title: 'Jev cost per search', note: 'lower is better', ours: ours.cost, theirs: theirs.cost,
-    format: value => `$${value.toFixed(4)}`, callout: `${(theirs.cost / ours.cost).toFixed(1)}× cheaper` },
-  { title: 'Search time', note: 'lower is better', ours: ours.seconds, theirs: theirs.seconds,
-    format: value => `${value.toFixed(1)} s`, callout: `${(theirs.seconds / ours.seconds).toFixed(1)}× faster` },
-  { title: 'Tokens handed to the agent', note: 'lower is better', ours: ours.tokens, theirs: theirs.tokens,
-    format: value => Math.round(value).toLocaleString('en-US'), callout: `${Math.round((1 - ours.tokens / theirs.tokens) * 100)}% fewer` },
+  { title: 'Required code found', headline: `${(ours.recall * 100).toFixed(1)}%`, sub: `vs ${(theirs.recall * 100).toFixed(1)}%`, ours: ours.recall, theirs: theirs.recall, max: 1 },
+  { title: 'Jev cost', headline: `${(theirs.cost / ours.cost).toFixed(1)}×`, sub: 'cheaper', ours: ours.cost, theirs: theirs.cost },
+  { title: 'Search speed', headline: `${(theirs.seconds / ours.seconds).toFixed(1)}×`, sub: 'faster', ours: ours.seconds, theirs: theirs.seconds },
+  { title: 'Agent tokens', headline: `${Math.round((1 - ours.tokens / theirs.tokens) * 100)}%`, sub: 'fewer', ours: ours.tokens, theirs: theirs.tokens },
 ];
 
 const esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 function render(theme) {
   const t = themes[theme];
   const width = 960;
-  const panelW = 440;
-  const panelH = 132;
-  const gapX = 24;
-  const left = 28;
-  const top = 96;
-  const barX = 108;
-  const barW = panelW - barX - 92;
+  const height = 400;
+  const left = 32;
+  const colW = (width - left * 2) / panels.length;
+  const barTop = 232;
+  const barH = 118;
+  const barW = 44;
+  const label = `JevTrace vs jevgrep on ${ours.cases} JS/TS tasks: ${panels.map(panel => `${panel.title} ${panel.headline} ${panel.sub}`).join('; ')}`;
   const parts = [];
-  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${top + 2 * panelH + 24 + 58}" viewBox="0 0 ${width} ${top + 2 * panelH + 24 + 58}" role="img" aria-label="JevTrace versus jevgrep on ${ours.cases} JS/TS tasks: ${panels.map(panel => `${panel.title} ${panel.format(panel.ours)} versus ${panel.format(panel.theirs)}`).join('; ')}">`);
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${esc(label)}">`);
   parts.push(`<style>text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}</style>`);
-  parts.push(`<rect x="0.5" y="0.5" width="${width - 1}" height="${top + 2 * panelH + 24 + 57}" rx="16" fill="${t.bg}" stroke="${t.border}"/>`);
-  parts.push(`<text x="${left}" y="44" font-size="24" font-weight="700" fill="${t.ink}">JevTrace vs jevgrep</text>`);
-  parts.push(`<text x="${left}" y="70" font-size="14" fill="${t.ink2}">Same ${ours.cases} JS/TS tasks, same checkouts, same scoring, same Jev provider</text>`);
-  // Legend (identity never by color alone: bars are also labelled per row).
-  const legendX = width - 250;
-  parts.push(`<rect x="${legendX}" y="34" width="14" height="10" rx="2" fill="${t.ours}"/><text x="${legendX + 20}" y="44" font-size="13" fill="${t.ink2}">JevTrace</text>`);
-  parts.push(`<rect x="${legendX + 100}" y="34" width="14" height="10" rx="2" fill="${t.theirs}"/><text x="${legendX + 120}" y="44" font-size="13" fill="${t.ink2}">jevgrep 0.7.0</text>`);
+  parts.push(`<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="18" fill="${t.bg}" stroke="${t.border}"/>`);
+  parts.push(`<text x="${left}" y="58" font-size="34" font-weight="750" fill="${t.ink}">JevTrace <tspan fill="${t.muted}" font-weight="500">vs</tspan> jevgrep</text>`);
+  const legendX = width - left - 290;
+  parts.push(`<rect x="${legendX}" y="36" width="18" height="18" rx="4" fill="${t.ours}"/><text x="${legendX + 26}" y="52" font-size="20" fill="${t.ink2}">JevTrace</text>`);
+  parts.push(`<rect x="${legendX + 140}" y="36" width="18" height="18" rx="4" fill="${t.theirs}"/><text x="${legendX + 166}" y="52" font-size="20" fill="${t.ink2}">jevgrep</text>`);
 
   panels.forEach((panel, index) => {
-    const x = left + (index % 2) * (panelW + gapX);
-    const y = top + Math.floor(index / 2) * panelH;
-    const max = panel.max ?? Math.max(panel.ours, panel.theirs) * 1.05;
-    parts.push(`<line x1="${x}" x2="${x + panelW}" y1="${y}" y2="${y}" stroke="${t.grid}"/>`);
-    parts.push(`<text x="${x}" y="${y + 26}" font-size="15" font-weight="650" fill="${t.ink}">${esc(panel.title)}</text>`);
-    parts.push(`<text x="${x + panelW}" y="${y + 26}" font-size="15" font-weight="700" fill="${t.ours}" text-anchor="end">${esc(panel.callout)}</text>`);
-    parts.push(`<text x="${x}" y="${y + 44}" font-size="11" fill="${t.muted}">${esc(panel.note)}</text>`);
-    [['JevTrace', panel.ours, t.ours, 62], ['jevgrep', panel.theirs, t.theirs, 94]].forEach(([label, value, color, dy]) => {
-      const w = Math.max(3, value / max * barW);
-      parts.push(`<text x="${x}" y="${y + dy + 13}" font-size="13" fill="${t.ink2}">${label}</text>`);
-      parts.push(`<rect x="${x + barX}" y="${y + dy}" width="${w.toFixed(1)}" height="18" rx="4" fill="${color}"/>`);
-      parts.push(`<text x="${x + barX + w + 8}" y="${y + dy + 13}" font-size="13" font-weight="650" fill="${t.ink}">${esc(panel.format(value))}</text>`);
+    const cx = left + colW * index + colW / 2;
+    if (index) parts.push(`<line x1="${left + colW * index}" x2="${left + colW * index}" y1="100" y2="${height - 28}" stroke="${t.grid}"/>`);
+    parts.push(`<text x="${cx}" y="116" font-size="20" font-weight="600" fill="${t.ink2}" text-anchor="middle">${esc(panel.title)}</text>`);
+    parts.push(`<text x="${cx}" y="174" font-size="56" font-weight="800" fill="${t.ours}" text-anchor="middle">${esc(panel.headline)}</text>`);
+    parts.push(`<text x="${cx}" y="206" font-size="20" font-weight="600" fill="${t.ink2}" text-anchor="middle">${esc(panel.sub)}</text>`);
+    const max = panel.max ?? Math.max(panel.ours, panel.theirs);
+    [[panel.ours, t.ours, -1], [panel.theirs, t.theirs, 1]].forEach(([value, color, side]) => {
+      const h = Math.max(4, value / max * barH);
+      const x = cx + side * 8 + (side < 0 ? -barW : 0);
+      parts.push(`<rect x="${x}" y="${barTop + barH - h}" width="${barW}" height="${h}" rx="5" fill="${color}"/>`);
     });
+    parts.push(`<line x1="${cx - 70}" x2="${cx + 70}" y1="${barTop + barH}" y2="${barTop + barH}" stroke="${t.grid}" stroke-width="2"/>`);
   });
-  const footY = top + 2 * panelH + 30;
-  parts.push(`<text x="${left}" y="${footY}" font-size="11.5" fill="${t.muted}">Retrieval benchmark, one cold search per task. Task labels were written by the JevTrace authors; "delivered" counts source in the tool output,</text>`);
-  parts.push(`<text x="${left}" y="${footY + 17}" font-size="11.5" fill="${t.muted}">not files listed as reading leads. Tokens are characters ÷ 4. Method, per-task results and reproduction: docs/benchmark-vs-jevgrep.md</text>`);
   parts.push('</svg>');
   return parts.join('\n');
 }
