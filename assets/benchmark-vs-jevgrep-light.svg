@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="442" viewBox="0 0 960 442" role="img" aria-label="JevTrace versus jevgrep on 19 JS/TS tasks: Required code delivered 89.5% versus 70.6%; Jev cost per search $0.0036 versus $0.0222; Search time 2.1 s versus 5.9 s; Tokens handed to the agent 7,036 versus 11,832">
+<style>text{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}</style>
+<rect x="0.5" y="0.5" width="959" height="441" rx="16" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="28" y="44" font-size="24" font-weight="700" fill="#0b0b0b">JevTrace vs jevgrep</text>
+<text x="28" y="70" font-size="14" fill="#52514e">Same 19 JS/TS tasks, same checkouts, same scoring, same Jev provider</text>
+<rect x="710" y="34" width="14" height="10" rx="2" fill="#2a78d6"/><text x="730" y="44" font-size="13" fill="#52514e">JevTrace</text>
+<rect x="810" y="34" width="14" height="10" rx="2" fill="#b9b7b0"/><text x="830" y="44" font-size="13" fill="#52514e">jevgrep 0.7.0</text>
+<line x1="28" x2="468" y1="96" y2="96" stroke="#e1e0d9"/>
+<text x="28" y="122" font-size="15" font-weight="650" fill="#0b0b0b">Required code delivered</text>
+<text x="468" y="122" font-size="15" font-weight="700" fill="#2a78d6" text-anchor="end">+18.9 pts</text>
+<text x="28" y="140" font-size="11" fill="#898781">higher is better</text>
+<text x="28" y="171" font-size="13" fill="#52514e">JevTrace</text>
+<rect x="136" y="158" width="214.7" height="18" rx="4" fill="#2a78d6"/>
+<text x="358.7368421052631" y="171" font-size="13" font-weight="650" fill="#0b0b0b">89.5%</text>
+<text x="28" y="203" font-size="13" fill="#52514e">jevgrep</text>
+<rect x="136" y="190" width="169.5" height="18" rx="4" fill="#b9b7b0"/>
+<text x="313.4736842105263" y="203" font-size="13" font-weight="650" fill="#0b0b0b">70.6%</text>
+<line x1="492" x2="932" y1="96" y2="96" stroke="#e1e0d9"/>
+<text x="492" y="122" font-size="15" font-weight="650" fill="#0b0b0b">Jev cost per search</text>
+<text x="932" y="122" font-size="15" font-weight="700" fill="#2a78d6" text-anchor="end">6.1× cheaper</text>
+<text x="492" y="140" font-size="11" fill="#898781">lower is better</text>
+<text x="492" y="171" font-size="13" fill="#52514e">JevTrace</text>
+<rect x="600" y="158" width="37.4" height="18" rx="4" fill="#2a78d6"/>
+<text x="645.3821892321305" y="171" font-size="13" font-weight="650" fill="#0b0b0b">$0.0036</text>
+<text x="492" y="203" font-size="13" fill="#52514e">jevgrep</text>
+<rect x="600" y="190" width="228.6" height="18" rx="4" fill="#b9b7b0"/>
+<text x="836.5714285714286" y="203" font-size="13" font-weight="650" fill="#0b0b0b">$0.0222</text>
+<line x1="28" x2="468" y1="228" y2="228" stroke="#e1e0d9"/>
+<text x="28" y="254" font-size="15" font-weight="650" fill="#0b0b0b">Search time</text>
+<text x="468" y="254" font-size="15" font-weight="700" fill="#2a78d6" text-anchor="end">2.8× faster</text>
+<text x="28" y="272" font-size="11" fill="#898781">lower is better</text>
+<text x="28" y="303" font-size="13" fill="#52514e">JevTrace</text>
+<rect x="136" y="290" width="82.7" height="18" rx="4" fill="#2a78d6"/>
+<text x="226.72133980836315" y="303" font-size="13" font-weight="650" fill="#0b0b0b">2.1 s</text>
+<text x="28" y="335" font-size="13" fill="#52514e">jevgrep</text>
+<rect x="136" y="322" width="228.6" height="18" rx="4" fill="#b9b7b0"/>
+<text x="372.57142857142856" y="335" font-size="13" font-weight="650" fill="#0b0b0b">5.9 s</text>
+<line x1="492" x2="932" y1="228" y2="228" stroke="#e1e0d9"/>
+<text x="492" y="254" font-size="15" font-weight="650" fill="#0b0b0b">Tokens handed to the agent</text>
+<text x="932" y="254" font-size="15" font-weight="700" fill="#2a78d6" text-anchor="end">41% fewer</text>
+<text x="492" y="272" font-size="11" fill="#898781">lower is better</text>
+<text x="492" y="303" font-size="13" fill="#52514e">JevTrace</text>
+<rect x="600" y="290" width="135.9" height="18" rx="4" fill="#2a78d6"/>
+<text x="743.9211850707118" y="303" font-size="13" font-weight="650" fill="#0b0b0b">7,036</text>
+<text x="492" y="335" font-size="13" fill="#52514e">jevgrep</text>
+<rect x="600" y="322" width="228.6" height="18" rx="4" fill="#b9b7b0"/>
+<text x="836.5714285714286" y="335" font-size="13" font-weight="650" fill="#0b0b0b">11,832</text>
+<text x="28" y="390" font-size="11.5" fill="#898781">Retrieval benchmark, one cold search per task. Task labels were written by the JevTrace authors; "delivered" counts source in the tool output,</text>
+<text x="28" y="407" font-size="11.5" fill="#898781">not files listed as reading leads. Tokens are characters ÷ 4. Method, per-task results and reproduction: docs/benchmark-vs-jevgrep.md</text>
+</svg>

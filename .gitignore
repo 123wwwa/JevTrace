@@ -10,3 +10,4 @@ benchmarks/results/
 coverage/
 *.log
 .DS_Store
+test/ui-host/generated/

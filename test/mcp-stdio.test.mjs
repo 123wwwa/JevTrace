@@ -177,3 +177,28 @@ test('a missing provider key is reported as a tool error', async t => {
   assert.equal(result.isError, true, text(result));
   assert.match(text(result), /API_KEY|key/i);
 });
+
+test('session savings accumulate across task-only retrievals and survive a no-context result', async t => {
+  const { client } = await connect(t, project(t, authProject));
+  const first = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token', tokenBudget: 500 } });
+  const second = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'decode jwt', tokenBudget: 500 } });
+  const [a, b] = [first.structuredContent.contextSavings, second.structuredContent.contextSavings];
+  assert.equal(a.session.retrievals, 1);
+  assert.equal(b.session.retrievals, 2);
+  assert.equal(b.session.candidateTokens, a.candidateTokens + b.candidateTokens);
+  assert.equal(b.session.savedTokens, a.savedTokens + b.savedTokens);
+  assert.deepEqual(b.session.points, [
+    [1, a.candidateTokens, a.returnedTokens],
+    [2, a.candidateTokens + b.candidateTokens, a.returnedTokens + b.returnedTokens],
+  ], 'the dashboard curve is cumulative per retrieval');
+  assert.equal(b.stage4Applied, false, 'the offline include-all judge ranks nothing');
+  assert.match(text(second), /Session so far: .* across 2 retrievals/);
+
+  const explicit = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2 } });
+  assert.equal(explicit.structuredContent.contextSavings, undefined, 'explicit-entry calls do not count toward session savings');
+
+  const none = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'zzqx wobble frobnicate' } });
+  assert.equal(none.structuredContent.status, 'incomplete');
+  assert.equal(none.structuredContent.items, undefined);
+  assert.equal(none.structuredContent.session.retrievals, 2);
+});

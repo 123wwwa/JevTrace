@@ -106,16 +106,22 @@ Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, revers
 
 `retrieve_dependency_context` also publishes a versioned MCP Apps view (currently `ui://jevtrace/context-savings-v2.html`) so hosts do not reuse stale dashboard bundles after UI changes. The legacy `ui://jevtrace/context-savings.html` URI remains registered as an alias to the latest bundle so existing chat results do not break. Hosts that support MCP Apps render the result as an inline dashboard; other hosts receive the same text and structured content.
 
-The dashboard reports:
+The dashboard shows one thing: **how many tokens JevTrace has saved in this session**.
 
-- estimated candidate-pool tokens versus estimated returned-context tokens;
-- excluded tokens and reduction percentage;
-- token-budget utilization and returned/candidate symbol counts;
-- semantic-lead count, raw/capped compiler-neighborhood tokens, and whether Stage 4 ran;
-- provider request count plus discovery, Stage 4, current retrieval latency, and a server-lifetime rolling median/p95 over the latest 50 task-only retrievals;
-- a short list of the implementation symbols actually returned to the coding agent.
+- A headline number: estimated tokens saved across every task-only retrieval since the server started, with the overall reduction and retrieval count.
+- A cumulative chart: tokens that would have been sent without JevTrace (every compiler candidate, dashed gray) against tokens actually sent to the agent (blue); the shaded gap is the saving. Hover or use the arrow keys to read the totals after any retrieval. After a single retrieval it is shown as two bars.
+- A **Details** popover with the latest retrieval only (candidate pool, sent tokens, symbols, provider requests, context ranking, time, status).
 
-The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history is in-memory only and resets when the server restarts. The dashboard is attached to the task-only tool only.
+The same totals are in the structured result as `contextSavings.session` (with cumulative `points`, thinned to at most 500) and in the text result as a `Session so far:` line.
+
+The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts. The dashboard is attached to the task-only tool only. It follows the host's light/dark theme from the MCP Apps host context, shows the host-supplied error message when a call fails, and shows a "no relevant code" notice (with the session totals) when discovery finds nothing.
+
+To see the dashboard without an MCP Apps host, record real results from the stdio server and open the bundled test host, which renders them the way a host does (sandboxed iframe plus the ext-apps `AppBridge`):
+
+```bash
+npm run ui:preview            # add -- --online to use the provider in .env, -- --root <dir> for another project
+npm run ui:host               # then open http://localhost:5179
+```
 
 ## Benchmarks
 

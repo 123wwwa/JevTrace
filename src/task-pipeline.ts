@@ -339,8 +339,9 @@ export async function retrieveTaskContext(
           item.semanticScore = semantic;
           item.finalScore = 0.7 * semantic + 0.3 * item.structuralScore;
         }
-        if (undecided) warnings.push(`${undecided} context-ranking answers were missing or invalid; those candidates kept their structural score`);
-        contextRankingApplied = true;
+        // A judge that scored nothing (e.g. the offline include-all judge) did not rank anything.
+        contextRankingApplied = undecided < rankingItems.length;
+        if (undecided && contextRankingApplied) warnings.push(`${undecided} context-ranking answers were missing or invalid; those candidates kept their structural score`);
       }
     }
   }

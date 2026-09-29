@@ -9,7 +9,7 @@ import { createJudge } from './judges.js';
 import { formatContext } from './retrieve.js';
 import { query } from './query.js';
 import { RepositoryIndex, discoverEntries } from './discovery.js';
-import { formatContextSavings, RetrievalLatencyWindow, summarizeContextSavings } from './context-metrics.js';
+import { formatContextSavings, RetrievalLatencyWindow, SessionSavings, summarizeContextSavings } from './context-metrics.js';
 
 const CONTEXT_UI_URI = 'ui://jevtrace/context-savings-v2.html';
 const LEGACY_CONTEXT_UI_URI = 'ui://jevtrace/context-savings.html';
@@ -20,6 +20,7 @@ export function createServer(root = process.cwd()): McpServer {
   const adapter = new TypeScriptAdapter(projectRoot);
   const index = new RepositoryIndex(projectRoot);
   const retrievalLatencies = new RetrievalLatencyWindow(50);
+  const sessionSavings = new SessionSavings();
   let judge: ReturnType<typeof createJudge> | undefined;
   // The adapter owns one active TS project; do not switch it during another request's await.
   let retrievalTail: Promise<void> = Promise.resolve();
@@ -81,14 +82,15 @@ export function createServer(root = process.cwd()): McpServer {
       if ('items' in result) {
         const totalMs = performance.now() - started;
         const latencyStats = retrievalLatencies.record(totalMs);
-        const contextSavings = summarizeContextSavings(result, totalMs, latencyStats);
+        const contextSavings = summarizeContextSavings(result, totalMs, latencyStats, sessionSavings);
         const savingsText = `${formatContextSavings(contextSavings)}\n`;
         return {
           content: [{ type: 'text', text: (discoveryText + savingsText + formatContext(result, maxChars)).slice(0, maxChars) }],
           structuredContent: { ...result, contextSavings },
         };
       }
-      return { content: [{ type: 'text', text: (discoveryText + result.warnings.join('\n')).slice(0, maxChars) }], structuredContent: { ...result } };
+      // No context was found; the dashboard still shows the session totals so far.
+      return { content: [{ type: 'text', text: (discoveryText + result.warnings.join('\n')).slice(0, maxChars) }], structuredContent: { ...result, session: sessionSavings.snapshot() } };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { isError: true, content: [{ type: 'text', text: message }] };

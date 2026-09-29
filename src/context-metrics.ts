@@ -34,6 +34,43 @@ export class RetrievalLatencyWindow {
   }
 }
 
+/** Cumulative totals after a retrieval: [retrieval number, candidate tokens so far, returned tokens so far]. */
+export type SessionSavingsPoint = [retrieval: number, candidateTokens: number, returnedTokens: number];
+
+export interface SessionSavingsStats {
+  retrievals: number;
+  candidateTokens: number;
+  returnedTokens: number;
+  savedTokens: number;
+  reductionPercent: number;
+  /** Cumulative curve for the dashboard chart; thinned to at most `maxPoints` (the last point is always kept). */
+  points: SessionSavingsPoint[];
+}
+
+/** Running totals over every task-only retrieval since the server started (in memory, reset on restart). */
+export class SessionSavings {
+  private stats: Omit<SessionSavingsStats, 'points'> = { retrievals: 0, candidateTokens: 0, returnedTokens: 0, savedTokens: 0, reductionPercent: 0 };
+  private points: SessionSavingsPoint[] = [];
+
+  constructor(private readonly maxPoints = 500) {}
+
+  record(candidateTokens: number, returnedTokens: number): SessionSavingsStats {
+    const retrievals = this.stats.retrievals + 1;
+    const candidate = this.stats.candidateTokens + candidateTokens;
+    const returned = this.stats.returnedTokens + returnedTokens;
+    const saved = this.stats.savedTokens + Math.max(0, candidateTokens - returnedTokens);
+    this.stats = { retrievals, candidateTokens: candidate, returnedTokens: returned, savedTokens: saved, reductionPercent: candidate ? saved / candidate : 0 };
+    this.points.push([retrievals, candidate, returned]);
+    // Points are cumulative, so dropping every other one keeps the curve exact at the points that remain.
+    if (this.points.length > this.maxPoints) this.points = this.points.filter((_, index) => index % 2 === 1 || index === this.points.length - 1);
+    return this.snapshot();
+  }
+
+  snapshot(): SessionSavingsStats {
+    return { ...this.stats, points: this.points.map(point => [...point] as SessionSavingsPoint) };
+  }
+}
+
 export interface ContextSavingsSummary {
   estimated: true;
   basis: 'ranking-pool' | 'explicit-entry';
@@ -56,6 +93,8 @@ export interface ContextSavingsSummary {
   stage4Ms?: number;
   totalMs: number;
   latencyStats?: RetrievalLatencyStats;
+  /** Totals since the server started, including this retrieval. */
+  session?: SessionSavingsStats;
   status: 'complete' | 'incomplete';
   warningCount: number;
 }
@@ -75,7 +114,7 @@ const attempts = (result: QuerySuccess): number => {
   return traversalRequests + discoveryRequests;
 };
 
-export function summarizeContextSavings(result: QuerySuccess, totalMs: number, latencyStats?: RetrievalLatencyStats): ContextSavingsSummary {
+export function summarizeContextSavings(result: QuerySuccess, totalMs: number, latencyStats?: RetrievalLatencyStats, session?: SessionSavings): ContextSavingsSummary {
   const candidateTokens = result.rankingPool?.stats.tokens;
   const savedTokens = candidateTokens === undefined ? undefined : Math.max(0, candidateTokens - result.usedTokens);
   const reductionPercent = candidateTokens && savedTokens !== undefined ? savedTokens / candidateTokens : undefined;
@@ -102,6 +141,7 @@ export function summarizeContextSavings(result: QuerySuccess, totalMs: number, l
     stage4Ms: result.contextRankingLatencyMs,
     totalMs,
     latencyStats,
+    session: session && candidateTokens !== undefined ? session.record(candidateTokens, result.usedTokens) : session?.snapshot(),
     status: result.status,
     warningCount: result.warnings.length,
   };
@@ -112,5 +152,8 @@ export function formatContextSavings(summary: ContextSavingsSummary): string {
     return `Estimated returned context: ${summary.returnedTokens.toLocaleString()} tokens (explicit-entry path; no comparable ranking pool).`;
   }
 
-  return `Estimated context: ${summary.candidateTokens.toLocaleString()} → ${summary.returnedTokens.toLocaleString()} tokens (${(summary.reductionPercent * 100).toFixed(1)}% reduction, ${summary.savedTokens.toLocaleString()} tokens excluded).`;
+  const line = `Estimated context: ${summary.candidateTokens.toLocaleString()} → ${summary.returnedTokens.toLocaleString()} tokens (${(summary.reductionPercent * 100).toFixed(1)}% reduction, ${summary.savedTokens.toLocaleString()} tokens excluded).`;
+  const session = summary.session;
+  if (!session?.retrievals) return line;
+  return `${line}\nSession so far: ${session.savedTokens.toLocaleString()} tokens excluded across ${session.retrievals.toLocaleString()} retrieval${session.retrievals === 1 ? '' : 's'} (${(session.reductionPercent * 100).toFixed(1)}%).`;
 }

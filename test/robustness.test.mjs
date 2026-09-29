@@ -241,3 +241,15 @@ test('type-level leads only fill lead slots that qualifying callables leave open
   const sparse = await discoverEntries(new RepositoryIndex(root), judge(node => node.name === 'RefreshOptions' || node.name === 'alphaRefresh' || node.id.startsWith('file::') ? 0.9 : 0.1), 'refresh');
   assert.deepEqual(sparse.semanticLeads.map(lead => lead.name), ['alphaRefresh', 'RefreshOptions']);
 });
+
+test('session savings keep an exact cumulative curve when thinned', async () => {
+  const { SessionSavings } = await import('../dist/context-metrics.js');
+  const session = new SessionSavings(4);
+  for (let index = 1; index <= 9; index++) session.record(100, 60);
+  const stats = session.snapshot();
+  assert.equal(stats.retrievals, 9);
+  assert.equal(stats.savedTokens, 360);
+  assert.ok(stats.points.length <= 4);
+  assert.deepEqual(stats.points.at(-1), [9, 900, 540], 'the latest point is always kept');
+  for (const [retrieval, candidate, returned] of stats.points) assert.deepEqual([candidate, returned], [retrieval * 100, retrieval * 60]);
+});

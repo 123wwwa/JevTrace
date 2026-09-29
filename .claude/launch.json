@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ui-host",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "ui:host"],
+      "port": 5179
+    }
+  ]
+}
