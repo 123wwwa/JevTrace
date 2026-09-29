@@ -2,15 +2,19 @@
   "name": "jevtrace",
   "version": "0.1.0",
   "description": "Dependency-aware JS/TS context retrieval for coding agents",
+  "keywords": ["mcp", "typescript", "javascript", "code-context", "coding-agent", "retrieval"],
+  "repository": { "type": "git", "url": "git+https://github.com/123wwwa/JevTrace.git" },
+  "homepage": "https://github.com/123wwwa/JevTrace#readme",
+  "bugs": { "url": "https://github.com/123wwwa/JevTrace/issues" },
   "type": "module",
   "bin": { "jevtrace": "./dist/cli.js" },
-  "files": ["dist", "README.md", "skills", "docs"],
+  "files": ["dist", "README.md", "docs"],
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json && vite build",
     "prepack": "npm run build",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node test/retrieve.test.mjs && node test/evaluate.test.mjs && node test/benchmark.test.mjs && node test/discovery.test.mjs",
+    "test": "npm run build && node test/retrieve.test.mjs && node test/evaluate.test.mjs && node test/benchmark.test.mjs && node test/discovery.test.mjs && node test/robustness.test.mjs && node test/mcp-stdio.test.mjs",
     "bench:smoke": "npm run build && node --env-file=.env test/benchmark.mjs",
     "bench": "npm run build && node --env-file=.env test/benchmark-suite.mjs",
     "bench:verbose": "npm run build && node --env-file=.env test/benchmark-suite.mjs --verbose",
@@ -26,7 +30,7 @@
     "@modelcontextprotocol/ext-apps": "^2.0.3",
     "@modelcontextprotocol/server": "^2.0.0",
     "typescript": "^6.0.0",
-    "zod": "^4.0.0"
+    "zod": "^4.2.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",

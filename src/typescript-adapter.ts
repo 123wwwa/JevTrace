@@ -39,6 +39,10 @@ function callerOwner(node: ts.Node): { node: ts.Node; name: string } | undefined
   }
   return undefined;
 }
+const isTestFile = (file: string): boolean =>
+  /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)/i.test(file) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
+/** Language services kept warm across tsconfig projects; switching back to a recent project reuses its program. */
+const maxWarmProjects = 4;
 function signature(node: ts.Node, source: ts.SourceFile): string {
   if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node))
     return source.text.slice(node.getStart(source), node.body ? node.body.getStart(source) : node.getEnd()).trim();
@@ -53,6 +57,8 @@ export class TypeScriptAdapter implements LanguageAdapter {
   private checker?: ts.TypeChecker;
   private projectKey?: string;
   private service?: ts.LanguageService;
+  private readonly services = new Map<string, ts.LanguageService>();
+  private readonly scanCache = new WeakMap<ts.Program, Map<string, DependencyScan>>();
   private readonly projectConfigs: ParsedProjectConfig[];
   constructor(readonly root: string) {
     this.projectConfigs = parseProjectConfigs(root).projects;
@@ -86,6 +92,28 @@ export class TypeScriptAdapter implements LanguageAdapter {
 
   dependencies(node: CodeNode): DependencyScan {
     if (!node.external) this.loadProgram(this.safePath(node.file));
+    return this.cachedScan(`forward:${node.id}`, () => this.scanDependencies(node));
+  }
+
+  reverseDependencies(node: CodeNode): DependencyScan {
+    if (!node.external) this.loadProgram(this.safePath(node.file));
+    return this.cachedScan(`reverse:${node.id}`, () => this.scanReverseDependencies(node));
+  }
+
+  /** Scans are memoized per Program: any edited file yields a new Program and therefore a fresh cache. */
+  private cachedScan(key: string, scan: () => DependencyScan): DependencyScan {
+    const program = this.program;
+    let scans = program && this.scanCache.get(program);
+    if (program && !scans) this.scanCache.set(program, scans = new Map());
+    let result = scans?.get(key);
+    if (!result) {
+      result = scan();
+      scans?.set(key, result);
+    }
+    return { edges: [...result.edges], unresolved: [...result.unresolved] };
+  }
+
+  private scanDependencies(node: CodeNode): DependencyScan {
     const source = this.program?.getSourceFile(path.resolve(this.root, node.file));
     const owner = source && this.findNode(source, node);
     if (!owner || !source || !this.checker || node.external) return { edges: [], unresolved: [] };
@@ -118,13 +146,14 @@ export class TypeScriptAdapter implements LanguageAdapter {
     return { edges: [...edges.values()], unresolved };
   }
 
-  reverseDependencies(node: CodeNode): DependencyScan {
-    if (!node.external) this.loadProgram(this.safePath(node.file));
+  private scanReverseDependencies(node: CodeNode): DependencyScan {
     if (!this.program || !this.service) return { edges: [], unresolved: [] };
     const entrySource = this.program.getSourceFile(path.resolve(this.root, node.file));
     const entryDeclaration = entrySource && this.findNode(entrySource, node);
     const entryName = entryDeclaration && (entryDeclaration as ts.NamedDeclaration).name;
     if (!entrySource || !entryName) return { edges: [], unresolved: [] };
+    const typeLike = ts.isInterfaceDeclaration(entryDeclaration) || ts.isTypeAliasDeclaration(entryDeclaration)
+      || ts.isEnumDeclaration(entryDeclaration) || ts.isClassDeclaration(entryDeclaration);
     const edges = new Map<string, Dependency>();
     const pending: Array<{ fileName: string; position: number }> = [{ fileName: entrySource.fileName, position: entryName.getStart(entrySource) }];
     const searched = new Set<string>();
@@ -161,12 +190,19 @@ export class TypeScriptAdapter implements LanguageAdapter {
         if (ref.isDefinition) continue;
         let call = siteNode;
         while (call && !ts.isCallExpression(call) && !ts.isNewExpression(call)) call = call.parent;
-        if (!call || ref.textSpan.start < call.expression.getStart(source) || ref.textSpan.start >= call.expression.getEnd()) continue;
+        if (!call || ref.textSpan.start < call.expression.getStart(source) || ref.textSpan.start >= call.expression.getEnd()) {
+          // Type-level targets are used through annotations and member access, not calls: record the enclosing callable.
+          const user = typeLike ? callerOwner(siteNode) : undefined;
+          if (user) {
+            const caller = this.toCodeNode(user.node, user.name);
+            if (caller.id !== node.id) edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, siteNode) });
+          }
+          continue;
+        }
         const owner = callerOwner(call.parent);
         if (!owner) continue;
         const caller = this.toCodeNode(owner.node, owner.name);
-        const isTest = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)/i.test(caller.file) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(caller.file);
-        edges.set(caller.id, { kind: isTest ? 'test' : 'caller', target: caller, site: this.location(source, call) });
+        edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, call) });
       }
     }
 
@@ -216,8 +252,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
               const owner = callerOwner(current.parent);
               if (owner) {
                 const caller = this.toCodeNode(owner.node, owner.name);
-                const isTest = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)/i.test(caller.file) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(caller.file);
-                edges.set(caller.id, { kind: isTest ? 'test' : 'caller', target: caller, site: this.location(source, current) });
+                edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, current) });
               }
             }
           }
@@ -306,13 +341,23 @@ export class TypeScriptAdapter implements LanguageAdapter {
       options = { allowJs: true, checkJs: false, moduleResolution: ts.ModuleResolutionKind.Bundler, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, noEmit: true };
     }
     const key = JSON.stringify([configPath ?? this.root, files, options, projectReferences]);
-    if (this.projectKey === key) {
-      this.program = this.service?.getProgram();
+    const warm = this.projectKey === key ? this.service : this.services.get(key);
+    if (warm) {
+      // Most-recently-used order: re-insert on every use.
+      this.services.delete(key);
+      this.services.set(key, warm);
+      this.service = warm;
+      this.program = warm.getProgram();
       this.checker = this.program?.getTypeChecker();
+      this.projectKey = key;
       return;
     }
-    this.service?.dispose();
-    this.service = ts.createLanguageService({
+    if (this.services.size >= maxWarmProjects) {
+      const [coldestKey, coldest] = this.services.entries().next().value!;
+      coldest.dispose();
+      this.services.delete(coldestKey);
+    }
+    const service = ts.createLanguageService({
       getCompilationSettings: () => options,
       getScriptFileNames: () => files,
       getScriptVersion: file => {
@@ -333,6 +378,8 @@ export class TypeScriptAdapter implements LanguageAdapter {
       useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
       getNewLine: () => ts.sys.newLine,
     });
+    this.services.set(key, service);
+    this.service = service;
     this.program = this.service.getProgram();
     if (!this.program) throw new Error('TypeScript language service could not create a program');
     this.checker = this.program.getTypeChecker();

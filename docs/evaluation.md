@@ -241,3 +241,23 @@ npm run bench:batch-sizes
 ~~~
 
 `bench:rounds` is a provider-latency diagnostic. `bench:batch-sizes` is retained as a diagnostic microbenchmark rather than a production tuning target; Jev is designed to evaluate independent questions together, so JevTrace's normal architecture keeps same-depth candidates batched by frontier. The benchmark scripts use .env for OPENROUTER_API_KEY.
+
+## First real-repository baseline: Ky
+
+The first valid real-repository run used [sindresorhus/ky](https://github.com/sindresorhus/ky) with the task `Change how HTTP 429 retry delay is calculated from Retry-After`, starting from `Ky.#calculateRetryDelay`. After fixing `maxDepth` to be a hard bound and removing evaluation node/token caps, the recorded comparison was:
+
+| Ky run | Included dependencies | Context tokens | Context reduction | Dependency-count reduction |
+| --- | ---: | ---: | ---: | ---: |
+| static-all | 35 | 5,049 | — | — |
+| Jev, candidate-only payload | 11 | 2,152 | 57.4% | 68.6% |
+| Jev, enriched supporting context | 14 | 3,591 | 28.9% | 60.0% |
+
+The first Jev run used two provider requests and completed in about 0.78s. After enriching the relevance payload with entry source plus checker-derived supporting constants/types (see [architecture](architecture.md#relevance-payload)), the same task still used two provider requests and completed in about 0.96s; total provider payload grew from roughly 21.2 KB to 35.9 KB. The richer context reduced compression, but `normalizeRetryOptions` moved from a Jev relevance score of **0.22** to **0.51**, crossing the default 0.3 inclusion boundary once Jev could see the retry defaults and related local context. This is evidence that supporting context can materially improve an individual relevance decision, with an explicit context-size and payload tradeoff. Both runs remained `incomplete` because static resolution had unresolved references and traversal intentionally stopped at `maxDepth=2`. This is a single-task descriptive result rather than a precision/recall benchmark.
+
+## Latency observations
+
+Frontier batching reduces a depth-two traversal to two relevance rounds. Round-level instrumentation records candidate count, payload bytes, provider batches/requests, cache hits, and latency. Similar-sized OpenRouter/Jev requests have shown substantial tail-latency variation across runs, so provider latency is treated as an observed external variable rather than evidence that smaller local batches are better. `bench:batch-sizes` remains a diagnostic, not the default optimization strategy.
+
+## Relation to DyRetriever's ablation
+
+DyRetriever's published ablation is motivation for this setup, not a result for JevTrace: removing multi-hop reduced Pass@1 by 6.0%–9.6%, while removing all of DyRetriever reduced it by 15.7%–51.1% in the reported configurations. Removing similarity retrieval reduced it by 6.5%–23.8%. Those experiments generated functions on CoderEval/DevEval; this project targets existing-code changes, where tests and callers may be more useful. See [the paper's ablation table](https://arxiv.org/html/2608.01927v1).

@@ -5,10 +5,7 @@
       "command": "node",
       "args": ["dist/cli.js", "--root", "${workspaceFolder}"],
       "cwd": "${workspaceFolder}",
-      "envFile": "${workspaceFolder}/.env",
-      "dev": {
-        "watch": ["dist/**/*.js", "dist/context-savings.html"]
-      }
+      "envFile": "${workspaceFolder}/.env"
     }
   }
 }

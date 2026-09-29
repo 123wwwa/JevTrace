@@ -250,21 +250,24 @@ export class JevJudge implements RelevanceJudge {
 
       }
 
-      const entries = batch.map((candidate, index) => {
+      let invalidAnswers = 0;
+      const entries = batch.flatMap((candidate, index) => {
         const answer = answers![`candidate_${index}`];
         const score = typeof answer === 'number' ? answer
           : typeof answer?.noul === 'number' ? answer.noul
           : typeof answer?.probability === 'number' ? answer.probability
           : typeof answer?.value === 'number' ? answer.value
           : typeof answer?.value === 'boolean' ? Number(answer.value) : NaN;
+        // One malformed answer leaves that candidate undecided; callers decide how to degrade.
         if (!Number.isFinite(score) || score < 0 || score > 1) {
-          throw new Error(`Invalid Jev answer for candidate_${index}`);
+          invalidAnswers++;
+          return [];
         }
-        return [candidate.node.id, { include: score >= this.threshold, score }] as [string, Judgment];
+        return [[candidate.node.id, { include: score >= this.threshold, score }] as [string, Judgment]];
       });
 
       // Cache only complete, validated batches, including entry-discovery answers.
-      if (!cacheHit) {
+      if (!cacheHit && !invalidAnswers) {
         if (this.cache.size >= 256) this.cache.delete(this.cache.keys().next().value!);
         this.cache.set(digest, answers!);
       }
@@ -277,6 +280,7 @@ export class JevJudge implements RelevanceJudge {
           latencyMs: performance.now() - started,
           cacheHit,
           attempts,
+          ...(invalidAnswers ? { invalidAnswers } : {}),
         },
       };
     };

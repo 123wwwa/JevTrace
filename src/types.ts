@@ -60,6 +60,8 @@ export interface ProviderBatchStats {
   latencyMs: number;
   cacheHit: boolean;
   attempts: number;
+  /** Answers that were missing or outside [0, 1]; those candidates are left undecided instead of failing the batch. */
+  invalidAnswers?: number;
 }
 
 export interface JudgeCallStats {

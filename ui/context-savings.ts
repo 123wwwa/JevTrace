@@ -21,6 +21,12 @@ interface Savings {
   discoveryMs?: number;
   stage4Ms?: number;
   totalMs: number;
+  latencyStats?: {
+    medianMs: number;
+    p95Ms: number;
+    sampleCount: number;
+    windowSize: number;
+  };
   status: 'complete' | 'incomplete';
   warningCount: number;
 }
@@ -114,7 +120,7 @@ const css = `
   .bar.before { background: var(--bar-before); }
   .bar.after { background: var(--bar-after); }
   .bar-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
-  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; margin-bottom: 14px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: 10px; margin-bottom: 14px; }
   .metric { padding: 12px; }
   .metric-name { color: var(--muted); font-size: 10px; margin-bottom: 5px; }
   .metric-value { font-size: 16px; font-weight: 760; font-variant-numeric: tabular-nums; }
@@ -239,9 +245,14 @@ function render(payload: ViewPayload): void {
           <div class="metric-sub">${s.stage4Applied ? 'includes Stage 4' : 'discovery path'}</div>
         </div>
         <div class="metric">
-          <div class="metric-name">Total retrieval</div>
+          <div class="metric-name">Current retrieval</div>
           <div class="metric-value">${ms(s.totalMs)}</div>
           <div class="metric-sub">${s.warningCount ? `${integer(s.warningCount)} warnings` : 'no warnings'}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-name">P95 latency</div>
+          <div class="metric-value">${ms(s.latencyStats?.p95Ms)}</div>
+          <div class="metric-sub">median ${ms(s.latencyStats?.medianMs)} · n ${integer(s.latencyStats?.sampleCount)}/${integer(s.latencyStats?.windowSize)}</div>
         </div>
       </div>
 
@@ -278,6 +289,7 @@ function render(payload: ViewPayload): void {
       <div class="footnote">
         Token counts are JevTrace estimates (approximately source characters ÷ 4), not provider billing tokens.
         “Reduction” compares the final ranking pool with the context returned by this MCP tool.
+        Latency median/p95 use the latest server-lifetime rolling window (up to 50 task-only retrievals).
       </div>
     </section>
   `;

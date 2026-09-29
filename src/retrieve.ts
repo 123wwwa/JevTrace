@@ -158,8 +158,11 @@ export async function retrieve(adapter: LanguageAdapter, judge: RelevanceJudge, 
 
     return frontier.map(({ candidate, path, wrapper }) => {
       const decision = decisions.get(candidate.node.id);
-      if (candidate.kind !== 'type' && !decision)
-        throw new Error(`Relevance judge omitted a decision for ${candidate.node.file}:${candidate.node.startLine}`);
+      if (candidate.kind !== 'type' && !decision) {
+        // An undecided candidate scores 0 (omitted) instead of failing the whole retrieval.
+        incomplete = true;
+        warnings.push(`Relevance judge omitted a decision for ${candidate.node.file}:${candidate.node.startLine}; treated as score 0`);
+      }
       const score = candidate.kind === 'type' ? 1 : decision?.score ?? (decision?.include ? 1 : 0);
       const priority = (candidate.kind === 'type' ? 1 : Math.max(score, wrapper ? 0.45 : 0)) * Math.pow(0.8, candidate.depth - 1);
       return { candidate, score, path, wrapper, priority };

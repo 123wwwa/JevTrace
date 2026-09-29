@@ -4,9 +4,17 @@ import { retrieveTaskContext, type TaskPipelineOptions } from './task-pipeline.j
 import type { EntryInput, LanguageAdapter, RelevanceJudge } from './types.js';
 
 export type QueryResult = RetrievalResult & { discovery?: DiscoveryResult };
+export type IncompleteQueryResult = { status: 'incomplete'; task: string; discovery: DiscoveryResult; warnings: string[] };
+type QueryOptions = RetrievalOptions & DiscoveryOptions & TaskPipelineOptions;
 
+export function query(index: RepositoryIndex, adapter: LanguageAdapter, judge: RelevanceJudge, task: string,
+  input: EntryInput, options?: QueryOptions): Promise<QueryResult>;
+export function query(index: RepositoryIndex, adapter: LanguageAdapter, judge: RelevanceJudge, task: string,
+  input: undefined, options?: QueryOptions): Promise<QueryResult | IncompleteQueryResult>;
+export function query(index: RepositoryIndex, adapter: LanguageAdapter, judge: RelevanceJudge, task: string,
+  input: EntryInput | undefined, options?: QueryOptions): Promise<QueryResult | IncompleteQueryResult>;
 export async function query(index: RepositoryIndex, adapter: LanguageAdapter, judge: RelevanceJudge, task: string,
-  input?: EntryInput, options: RetrievalOptions & DiscoveryOptions & TaskPipelineOptions = {}): Promise<QueryResult | { status: 'incomplete'; task: string; discovery: DiscoveryResult; warnings: string[] }> {
+  input?: EntryInput, options: QueryOptions = {}): Promise<QueryResult | IncompleteQueryResult> {
   options.signal?.throwIfAborted();
   if (input) return retrieve(adapter, judge, task, input, options);
   return retrieveTaskContext(index, adapter, judge, judge, task, options);

@@ -98,9 +98,30 @@ The development benchmark currently supports the following narrow implementation
 2. **Lexical retrieval remains useful, but its clearest observed role is as a cheap hint to Jev discovery.** Unconditionally merging the lexical top-k into the final pool increased ranking pressure without improving recall on the current four cases.
 3. **Stage 4 should remain conditional.** It can recover important context under moderate token pressure, but it has no observed recall benefit when the pool already fits and can hurt under extreme pressure with the current score blend.
 4. **The leaner task-only path is now the runtime default:** lexical-assisted Jev discovery → compiler expansion → conditional Stage 4. The full lexical merge and structural-only modes remain available as ablations/fallbacks until holdout evaluation exists.
-5. **The current results are not final generalization evidence.** The task wording audit found identifier/path overlap in some development cases, and no holdout cases exist yet.
+5. **The current results are not final generalization evidence.** The task wording audit found identifier/path overlap in some development cases. A first holdout set now exists (see below), but it has since informed two changes.
 
 The benchmark infrastructure keeps the no-lexical-final-merge, pure-Jev, Jev-leads-only, and Stage 4 budget-sweep modes so future implementation changes can be checked against the same decomposed measurements.
+
+## Holdout set and robustness changes
+
+`benchmarks/holdout-cases.json` adds 15 source-reviewed `holdout` cases: 8 in [hono](https://github.com/honojs/hono) pinned at `37ce06904e732d4bc11c9075adf362c76049a594` (448 indexed files, adaptive directory scopes), 4 more in Ky and 3 more in jevgrep core. Task wording deliberately paraphrases instead of repeating identifiers, and labels were written from source before any run. Run it with `--manifest benchmarks/holdout-cases.json --split holdout`; hono is expected at `../../hono` relative to the manifest. `--modes a,b` restricts the modes, and a mode that throws is now recorded as an `error` run with zero recall instead of aborting the suite.
+
+The baseline run on the holdout exposed a crash: the repository index listed function-valued variables nested inside test callbacks, which the compiler adapter cannot resolve, and an unresolvable lead aborted the whole retrieval. The following changes were then made (see [architecture.md](architecture.md)): index/adapter declaration consistency, type-level declarations as semantic leads (after callables, and outside lexical ranking), per-lead failure isolation and provider-failure degradation, adaptive directory scopes, lexically ordered `maxJevFiles` capping, lexical file rescue, a signature level in the final budget cut, and per-program compiler scan caching with warm tsconfig projects.
+
+Runtime default mode (`pipeline-no-lexical-final-merge`), two cold repeats per case, OpenRouter, required-level recall at the 8,000-token budget:
+
+| Set | Runs | Errors before → after | Recall before → after | Provider requests | Mean wall time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Development (4 cases) | 8 | 0 → 0 | 100.0% → 95.8% | 5.5 → 7.8 | 1.13 s → 1.27 s |
+| Holdout (15 cases) | 30 | 3 → 0 | 86.7% → 95.0% | 13.1 → 15.1 | 2.46 s → 2.38 s |
+
+Offline (no provider), mean over `static-known-entry` and `pipeline-lexical-only`: development 95.8% → 95.8%, holdout 72.8% → 77.2% (3 crashes → 0).
+
+Caveats:
+
+- **The holdout is no longer untouched.** Two changes were made after seeing holdout runs: type-level declarations were removed from lexical ranking (they let large option interfaces dominate the lexical-only ablation, visible on both sets), and type-level leads were ordered after callables (they displaced needed callables in one development and two holdout runs). A large-body-starts-at-signature rule was tried and removed because it demoted jevgrep's `selectFile`. A fresh holdout is needed before claiming generalization.
+- The remaining development drop is one of two `jevgrep-selection-evidence` runs (67%): in that run Jev scored `evidenceRequest` below other leads. The holdout's remaining miss (`jevgrep-credential-redaction`, one of two runs at 50%) came from larger leads pushing `EvaluationFailure` past the neighborhood cap. Two repeats cannot separate these from provider variance.
+- Provider requests rose because symbol-level judging now also sees type-level declarations; wall time was roughly unchanged.
 
 ## Historical initial offline result (before reverse discovery recovery)
 

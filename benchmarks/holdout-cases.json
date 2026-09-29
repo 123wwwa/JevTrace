@@ -1,0 +1,548 @@
+{
+  "schemaVersion": 1,
+  "labelPolicy": "minimum-required-context",
+  "repositories": {
+    "ky": {
+      "root": "../../ky",
+      "revision": "0d59458a0a58e1c3d7c6db0ab17ed5c7cd671e47"
+    },
+    "jevgrep": {
+      "root": "../../jevgrep/packages/core/src",
+      "revision": "adbea4cc8560725f36a5f4bb8cc6fcce87d78185"
+    },
+    "hono": {
+      "root": "../../hono",
+      "revision": "37ce06904e732d4bc11c9075adf362c76049a594"
+    }
+  },
+  "options": {
+    "maxDepth": 2,
+    "maxNodes": 200,
+    "tokenBudget": 100000,
+    "pipelineTokenBudget": 8000,
+    "pipelinePerLeadTokenBudget": 8000,
+    "pipelineNeighborhoodTokenBudget": 16000,
+    "reverse": false,
+    "reverseFanIn": 12,
+    "maxCandidates": 64,
+    "maxLeads": 4,
+    "maxJevFiles": 256,
+    "maxRelevantFiles": 8,
+    "lexicalMergeLimit": 64
+  },
+  "cases": [
+    {
+      "id": "hono-etag-validator-list",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Conditional GET requests should answer Not Modified when any entry of a comma-separated client validator list matches, ignoring weak markers and surrounding whitespace",
+      "entry": {
+        "file": "src/middleware/etag/index.ts",
+        "line": 80
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/middleware/etag/index.ts",
+          "line": 80
+        }
+      ],
+      "required": [
+        {
+          "file": "src/middleware/etag/index.ts",
+          "name": "etag",
+          "line": 80,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/middleware/etag/index.ts",
+          "name": "etagMatches",
+          "line": 32,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/middleware/etag/index.ts",
+          "name": "stripWeak",
+          "line": 30,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The middleware owns the 304 decision; the matcher splits the client list and the weak-prefix helper defines comparison semantics."
+    },
+    {
+      "id": "hono-ip-mapped-ranges",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Network-range allow and deny rules written for IPv4 should also match clients that connect with IPv4-mapped IPv6 addresses",
+      "entry": {
+        "file": "src/middleware/ip-restriction/index.ts",
+        "line": 51
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/middleware/ip-restriction/index.ts",
+          "line": 51
+        }
+      ],
+      "required": [
+        {
+          "file": "src/middleware/ip-restriction/index.ts",
+          "name": "buildMatcher",
+          "line": 51,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/utils/ipaddr.ts",
+          "name": "isIPv4MappedIPv6",
+          "line": 314,
+          "requiredLevel": "signature"
+        },
+        {
+          "file": "src/utils/ipaddr.ts",
+          "name": "convertIPv4MappedIPv6ToIPv4",
+          "line": 321,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "Rule compilation and remote matching live in the matcher builder; the two address helpers define the mapped-address conversion contract."
+    },
+    {
+      "id": "hono-token-clock-skew",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Allow a configurable clock-skew tolerance when checking whether a signed bearer token is expired or not yet valid",
+      "entry": {
+        "file": "src/utils/jwt/jwt.ts",
+        "line": 96
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/utils/jwt/jwt.ts",
+          "line": 96
+        }
+      ],
+      "required": [
+        {
+          "file": "src/utils/jwt/jwt.ts",
+          "name": "verify",
+          "line": 96,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/utils/jwt/types.ts",
+          "name": "JwtTokenExpired",
+          "line": 41,
+          "requiredLevel": "signature"
+        },
+        {
+          "file": "src/utils/jwt/types.ts",
+          "name": "JwtTokenNotBefore",
+          "line": 34,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The verifier owns the time-claim checks and option defaults; the two error classes are the thrown contracts."
+    },
+    {
+      "id": "hono-request-body-reuse",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Reading the incoming request body as text after a handler already consumed it as parsed JSON should reuse the cached value instead of failing",
+      "entry": {
+        "file": "src/request.ts",
+        "line": 217
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/request.ts",
+          "line": 217
+        }
+      ],
+      "required": [
+        {
+          "file": "src/request.ts",
+          "name": "HonoRequest.#cachedBody",
+          "line": 217,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/request.ts",
+          "name": "HonoRequest.text",
+          "line": 274,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/request.ts",
+          "name": "HonoRequest.json",
+          "line": 258,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The private body cache converts between cached representations; text/json are the public readers that route through it."
+    },
+    {
+      "id": "hono-cookie-prefix-rules",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Cookies written with the host-bound name prefix must drop any domain, force the root path and the Secure flag, and reject invalid prefixed names when the header is produced",
+      "entry": {
+        "file": "src/helper/cookie/index.ts",
+        "line": 78
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/helper/cookie/index.ts",
+          "line": 78
+        }
+      ],
+      "required": [
+        {
+          "file": "src/helper/cookie/index.ts",
+          "name": "generateCookie",
+          "line": 78,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/utils/cookie.ts",
+          "name": "_serialize",
+          "line": 173,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/utils/cookie.ts",
+          "name": "serialize",
+          "line": 261,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The helper applies prefix options; the internal serializer enforces prefix constraints; the exported serializer is the bridge contract."
+    },
+    {
+      "id": "hono-deadline-dynamic",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Let the per-request deadline middleware compute its duration from the incoming request instead of a fixed number of milliseconds",
+      "entry": {
+        "file": "src/middleware/timeout/index.ts",
+        "line": 38
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/middleware/timeout/index.ts",
+          "line": 38
+        }
+      ],
+      "required": [
+        {
+          "file": "src/middleware/timeout/index.ts",
+          "name": "timeout",
+          "line": 38,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/middleware/timeout/index.ts",
+          "name": "HTTPExceptionFunction",
+          "line": 10,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The middleware factory owns timer creation and the race; the exception-factory type shows the existing context-dependent option pattern."
+    },
+    {
+      "id": "hono-csp-nonce",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "Content-Security-Policy script nonces should be generated once per request, reused across directives and exposed to handlers",
+      "entry": {
+        "file": "src/middleware/secure-headers/secure-headers.ts",
+        "line": 137
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/middleware/secure-headers/secure-headers.ts",
+          "line": 137
+        }
+      ],
+      "required": [
+        {
+          "file": "src/middleware/secure-headers/secure-headers.ts",
+          "name": "NONCE",
+          "line": 137,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/middleware/secure-headers/secure-headers.ts",
+          "name": "generateNonce",
+          "line": 131,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/middleware/secure-headers/secure-headers.ts",
+          "name": "getCSPDirectives",
+          "line": 246,
+          "requiredLevel": "body"
+        }
+      ],
+      "rationale": "The nonce handler stores the per-request value; the generator creates it; directive compilation invokes handlers per directive."
+    },
+    {
+      "id": "hono-thrown-http-response",
+      "split": "holdout",
+      "repository": "hono",
+      "task": "When a route handler throws an HTTP exception, respond with the response carried by that exception rather than a generic internal server error",
+      "entry": {
+        "file": "src/hono-base.ts",
+        "line": 35
+      },
+      "acceptableEntries": [
+        {
+          "file": "src/hono-base.ts",
+          "line": 35
+        }
+      ],
+      "required": [
+        {
+          "file": "src/hono-base.ts",
+          "name": "errorHandler",
+          "line": 35,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "src/http-exception.ts",
+          "name": "HTTPException.getResponse",
+          "line": 66,
+          "requiredLevel": "body"
+        }
+      ],
+      "rationale": "The default application error handler decides between the carried response and a 500; the exception builds its own response."
+    },
+    {
+      "id": "ky-retry-hook-control",
+      "split": "holdout",
+      "repository": "ky",
+      "task": "A hook that runs before each retry attempt should be able to stop further retries or supply a replacement response",
+      "entry": {
+        "file": "source/core/Ky.ts",
+        "line": 1099
+      },
+      "acceptableEntries": [
+        {
+          "file": "source/core/Ky.ts",
+          "line": 1099
+        }
+      ],
+      "required": [
+        {
+          "file": "source/core/Ky.ts",
+          "name": "Ky.#retryFromError",
+          "line": 1099,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source/core/Ky.ts",
+          "name": "Ky.#retry",
+          "line": 1091,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The retry-from-error path runs beforeRetry hooks and interprets their results; the retry wrapper is the caller contract."
+    },
+    {
+      "id": "ky-response-byte-cap",
+      "split": "holdout",
+      "repository": "ky",
+      "task": "Enforce an upper bound on how many bytes of a response body are read and fail with a dedicated error when it is exceeded",
+      "entry": {
+        "file": "source/utils/body.ts",
+        "line": 132
+      },
+      "acceptableEntries": [
+        {
+          "file": "source/utils/body.ts",
+          "line": 132
+        }
+      ],
+      "required": [
+        {
+          "file": "source/utils/body.ts",
+          "name": "limitResponseSize",
+          "line": 132,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source/errors/ResponseSizeError.ts",
+          "name": "ResponseSizeError",
+          "line": 20,
+          "requiredLevel": "signature"
+        },
+        {
+          "file": "source/core/Ky.ts",
+          "name": "Ky.#limitResponseSize",
+          "line": 1310,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The body utility wraps the stream and enforces the cap; the error is the thrown contract; the client method wires the option."
+    },
+    {
+      "id": "ky-header-deletion-extend",
+      "split": "holdout",
+      "repository": "ky",
+      "task": "When extending a client instance, a header explicitly set to undefined in the child options should remove the inherited header",
+      "entry": {
+        "file": "source/utils/merge.ts",
+        "line": 64
+      },
+      "acceptableEntries": [
+        {
+          "file": "source/utils/merge.ts",
+          "line": 64
+        }
+      ],
+      "required": [
+        {
+          "file": "source/utils/merge.ts",
+          "name": "mergeHeaders",
+          "line": 64,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source/utils/merge.ts",
+          "name": "toHeaderObject",
+          "line": 168,
+          "requiredLevel": "body"
+        }
+      ],
+      "rationale": "Header merging applies deletion markers; the normalizer decides which representations carry undefined markers."
+    },
+    {
+      "id": "ky-json-schema-validation",
+      "split": "holdout",
+      "repository": "ky",
+      "task": "Validate parsed JSON bodies against a user-supplied Standard Schema and surface validation issues as a dedicated error",
+      "entry": {
+        "file": "source/core/Ky.ts",
+        "line": 148
+      },
+      "acceptableEntries": [
+        {
+          "file": "source/core/Ky.ts",
+          "line": 148
+        }
+      ],
+      "required": [
+        {
+          "file": "source/core/Ky.ts",
+          "name": "validateJsonWithSchema",
+          "line": 148,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source/errors/SchemaValidationError.ts",
+          "name": "SchemaValidationError",
+          "line": 25,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The validator checks the schema shape and runs validation; the error class is the thrown contract."
+    },
+    {
+      "id": "jevgrep-secret-files",
+      "split": "holdout",
+      "repository": "jevgrep",
+      "task": "Skip secret-bearing files such as dotenv variants and private key material during repository enumeration unless the caller opts in",
+      "entry": {
+        "file": "filesystem.ts",
+        "line": 113
+      },
+      "acceptableEntries": [
+        {
+          "file": "filesystem.ts",
+          "line": 113
+        }
+      ],
+      "required": [
+        {
+          "file": "filesystem.ts",
+          "name": "isSensitive",
+          "line": 113,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "filesystem.ts",
+          "name": "filesystemDefaults",
+          "line": 31,
+          "requiredLevel": "body"
+        }
+      ],
+      "rationale": "The predicate implements the name policy; the defaults hold the sensitive name and suffix lists."
+    },
+    {
+      "id": "jevgrep-byte-bounded-units",
+      "split": "holdout",
+      "repository": "jevgrep",
+      "task": "Split large source snapshots into byte-bounded fragments that never cut through a UTF-8 character or the middle of a line",
+      "entry": {
+        "file": "source.ts",
+        "line": 322
+      },
+      "acceptableEntries": [
+        {
+          "file": "source.ts",
+          "line": 322
+        }
+      ],
+      "required": [
+        {
+          "file": "source.ts",
+          "name": "splitSource",
+          "line": 322,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source.ts",
+          "name": "textUnits",
+          "line": 29,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "source.ts",
+          "name": "sourceText",
+          "line": 23,
+          "requiredLevel": "body"
+        }
+      ],
+      "rationale": "The public splitter delegates to the unit builder, which owns byte/line boundary handling over precomputed offsets."
+    },
+    {
+      "id": "jevgrep-credential-redaction",
+      "split": "holdout",
+      "repository": "jevgrep",
+      "task": "Provider error diagnostics must never leak the credential, even when the key is split by whitespace or invisible characters",
+      "entry": {
+        "file": "evaluator.ts",
+        "line": 242
+      },
+      "acceptableEntries": [
+        {
+          "file": "evaluator.ts",
+          "line": 242
+        }
+      ],
+      "required": [
+        {
+          "file": "evaluator.ts",
+          "name": "providerDiagnostic",
+          "line": 242,
+          "requiredLevel": "body"
+        },
+        {
+          "file": "evaluator.ts",
+          "name": "EvaluationFailure",
+          "line": 13,
+          "requiredLevel": "signature"
+        }
+      ],
+      "rationale": "The diagnostic builder sanitizes and redacts provider messages; the failure class carries the diagnostic contract."
+    }
+  ]
+}

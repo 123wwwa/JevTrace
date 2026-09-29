@@ -11,7 +11,8 @@ import { query } from './query.js';
 import { RepositoryIndex, discoverEntries } from './discovery.js';
 import { formatContextSavings, RetrievalLatencyWindow, summarizeContextSavings } from './context-metrics.js';
 
-const CONTEXT_UI_URI = 'ui://jevtrace/context-savings.html';
+const CONTEXT_UI_URI = 'ui://jevtrace/context-savings-v2.html';
+const LEGACY_CONTEXT_UI_URI = 'ui://jevtrace/context-savings.html';
 
 export function createServer(root = process.cwd()): McpServer {
   const server = new McpServer({ name: 'jevtrace', version: '0.1.0' });
@@ -30,14 +31,18 @@ export function createServer(root = process.cwd()): McpServer {
     try { return await work(); } finally { release(); }
   };
 
-  registerAppResource(server, 'JevTrace context savings', CONTEXT_UI_URI, {
-    title: 'JevTrace Context Savings',
-    description: 'Interactive context-reduction and retrieval telemetry for retrieve_dependency_context.',
-    mimeType: RESOURCE_MIME_TYPE,
-  }, async uri => {
-    const html = await readFile(new URL('./context-savings.html', import.meta.url), 'utf8');
-    return { contents: [{ uri: uri.href, mimeType: RESOURCE_MIME_TYPE, text: html }] };
-  });
+  const registerContextUi = (uri: string) => {
+    registerAppResource(server, 'JevTrace context savings', uri, {
+      title: 'JevTrace Context Savings',
+      description: 'Interactive context-reduction and retrieval telemetry for retrieve_dependency_context.',
+      mimeType: RESOURCE_MIME_TYPE,
+    }, async resourceUri => {
+      const html = await readFile(new URL('./context-savings.html', import.meta.url), 'utf8');
+      return { contents: [{ uri: resourceUri.href, mimeType: RESOURCE_MIME_TYPE, text: html }] };
+    });
+  };
+  registerContextUi(CONTEXT_UI_URI);
+  registerContextUi(LEGACY_CONTEXT_UI_URI);
 
   registerAppTool(server, 'retrieve_dependency_context', {
     title: 'Retrieve JevTrace context',

@@ -34,13 +34,21 @@ export function parseProjectConfigs(root: string): { projects: ParsedProjectConf
   const projects: ParsedProjectConfig[] = [];
 
   for (const configPath of discoverProjectConfigs(root)) {
-    const raw = ts.readConfigFile(configPath, ts.sys.readFile);
-    if (raw.error) {
-      warnings.push(`Skipped project ${path.relative(root, configPath)}: ${ts.flattenDiagnosticMessageText(raw.error.messageText, ' ')}`);
+    // TypeScript's config APIs expect '/'-separated paths; a Windows path makes it assert on a parse error.
+    const tsPath = configPath.replaceAll('\\', '/');
+    let parsed: ts.ParsedCommandLine;
+    try {
+      const raw = ts.readConfigFile(tsPath, ts.sys.readFile);
+      if (raw.error) {
+        warnings.push(`Skipped project ${path.relative(root, configPath)}: ${ts.flattenDiagnosticMessageText(raw.error.messageText, ' ')}`);
+        continue;
+      }
+      parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, path.dirname(tsPath), undefined, tsPath);
+    } catch (error) {
+      // One unreadable config must not take down every other project.
+      warnings.push(`Skipped project ${path.relative(root, configPath)}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
-
-    const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, path.dirname(configPath));
     if (parsed.errors.length) {
       warnings.push(`Skipped project ${path.relative(root, configPath)}: ${ts.flattenDiagnosticMessageText(parsed.errors[0].messageText, ' ')}`);
       continue;

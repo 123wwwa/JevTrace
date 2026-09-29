@@ -44,9 +44,10 @@ for (const item of cases) {
 for (const item of cases) {
   const repository = manifest.repositories[item.repository];
   const root = path.resolve(path.dirname(manifestPath), repository.root);
-  const modes = offline
+  const defaultModes = offline
     ? ['static-known-entry', 'pipeline-lexical-only']
     : ['static-known-entry', 'jev-known-entry', 'pipeline-baseline', 'pipeline-lexical-only', 'pipeline-no-stage4-jev', 'pipeline-no-lexical-final-merge', 'pipeline-pure-jev', 'pipeline-jev-leads-only'];
+  const modes = arg('--modes') ? arg('--modes').split(',').filter(Boolean) : defaultModes;
   for (let repeat = 1; repeat <= repeats; repeat++) {
   for (const mode of modes) {
     process.stderr.write(`${item.id}: ${mode} repeat ${repeat}/${repeats}\n`);
@@ -63,6 +64,7 @@ for (const item of cases) {
     let result;
     let discoveryJudgeName = 'explicit';
     let contextJudgeName = 'include-all';
+    try {
     if (mode === 'static-known-entry' || mode === 'jev-known-entry') {
       const judge = mode === 'jev-known-entry'
         ? createJudge(process.env, { provider: arg('--provider'), model: arg('--model') })
@@ -94,6 +96,15 @@ for (const item of cases) {
         includeCompilerExpansion,
         contextRanking: useJevContextRanking ? 'jev' : 'structural',
       });
+    }
+    } catch (error) {
+      // A crashing mode is a measured failure (zero recall), not a reason to abort the whole suite.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`${item.id}: ${mode} failed: ${message}\n`);
+      runs.push({ caseId: item.id, repository: item.repository, revision: repository.revision, method: mode, repeat,
+        status: 'error', error: message, context: { requiredLevelRecall: 0 }, totalMs: performance.now() - started,
+        discoveryMs: 0, usedTokens: 0, providerRequests: 0, payloadBytes: 0 });
+      continue;
     }
     const totalMs = performance.now() - started;
     const traces = 'judgeTrace' in result ? result.judgeTrace : [];
@@ -178,6 +189,7 @@ const summary = [...grouped.values()].map(rows => {
     case: run.caseId,
     method: run.method,
     recall: rows.length === 1 ? percent(recalls[0]) : percentMeanSd(recalls),
+    errors: rows.filter(row => row.status === 'error').length,
     lexicalStrict: rows.length === 1 ? percent(run.stages?.lexicalCandidateRecall?.strictRecallAt64) : percentMeanSd(rows.map(row => row.stages?.lexicalCandidateRecall?.strictRecallAt64 ?? 0)),
     neighborhood: rows.length === 1 ? percent(run.stages?.neighborhood?.recall) : percentMeanSd(rows.map(row => row.stages?.neighborhood?.recall ?? 0)),
     leadsWithin1: rows.length === 1 ? percent(run.stages?.semanticLeads?.within1) : percentMeanSd(rows.map(row => row.stages?.semanticLeads?.within1 ?? 0)),

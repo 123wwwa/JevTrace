@@ -12,6 +12,7 @@ import { retrieveTaskContext } from '../dist/task-pipeline.js';
 import { scoreDiscovery, scoreRequiredContext } from '../dist/evaluate.js';
 import { InMemoryTransport, LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/server';
 import { createServer } from '../dist/server.js';
+import { RetrievalLatencyWindow } from '../dist/context-metrics.js';
 
 function semanticJudge({ fileScore = file => file.includes('auth') ? 0.9 : 0.8, symbolScore = name => name === 'refreshToken' ? 0.9 : 0.7 } = {}) {
   return {
@@ -276,6 +277,15 @@ test('CLI accepts a task alone and preserves explicit entry mode', t => {
   assert.equal(explicit.entry.name, 'refreshToken');
 });
 
+test('retrieval latency window keeps a bounded rolling median and nearest-rank p95', () => {
+  const window = new RetrievalLatencyWindow(5);
+  for (const value of [10, 20, 30, 40, 50]) window.record(value);
+  assert.deepEqual(window.snapshot(), { medianMs: 30, p95Ms: 50, sampleCount: 5, windowSize: 5 });
+  assert.deepEqual(window.record(60), { medianMs: 40, p95Ms: 60, sampleCount: 5, windowSize: 5 });
+  assert.throws(() => new RetrievalLatencyWindow(0), /positive integer/);
+  assert.throws(() => window.record(-1), /non-negative finite/);
+});
+
 test('MCP exposes discovery and accepts task-only retrieval through its wire schema', async t => {
   const root = fixture(t);
   const previous = process.env.JEVTRACE_JUDGE;
@@ -298,13 +308,17 @@ test('MCP exposes discovery and accepts task-only retrieval through its wire sch
   assert.ok(listed.tools.some(tool => tool.name === 'discover_entries'));
   assert.ok(listed.tools.some(tool => tool.name === 'retrieve_from_entry'));
   const retrievalTool = listed.tools.find(tool => tool.name === 'retrieve_dependency_context');
-  assert.equal(retrievalTool?._meta?.ui?.resourceUri, 'ui://jevtrace/context-savings.html');
+  assert.equal(retrievalTool?._meta?.ui?.resourceUri, 'ui://jevtrace/context-savings-v2.html');
   assert.equal(retrievalTool?.inputSchema?.properties?.file, undefined);
   const resources = await request('resources/list', {});
+  assert.ok(resources.resources.some(resource => resource.uri === 'ui://jevtrace/context-savings-v2.html'));
   assert.ok(resources.resources.some(resource => resource.uri === 'ui://jevtrace/context-savings.html'));
-  const ui = await request('resources/read', { uri: 'ui://jevtrace/context-savings.html' });
+  const ui = await request('resources/read', { uri: 'ui://jevtrace/context-savings-v2.html' });
   assert.match(ui.contents[0].mimeType, /mcp-app/);
   assert.match(ui.contents[0].text, /JevTrace Context Savings/);
+  const legacyUi = await request('resources/read', { uri: 'ui://jevtrace/context-savings.html' });
+  assert.match(legacyUi.contents[0].mimeType, /mcp-app/);
+  assert.match(legacyUi.contents[0].text, /JevTrace Context Savings/);
   const discovered = await request('tools/call', { name: 'discover_entries', arguments: { task: 'refresh token' } });
   assert.equal(discovered.isError, undefined);
   assert.equal(discovered.structuredContent.mode, 'lexical');
@@ -316,7 +330,12 @@ test('MCP exposes discovery and accepts task-only retrieval through its wire sch
   assert.equal(result.structuredContent.contextSavings.available, true);
   assert.equal(result.structuredContent.contextSavings.candidateTokens, result.structuredContent.rankingPool.stats.tokens);
   assert.equal(result.structuredContent.contextSavings.returnedTokens, result.structuredContent.usedTokens);
+  assert.equal(result.structuredContent.contextSavings.latencyStats.sampleCount, 1);
+  assert.equal(result.structuredContent.contextSavings.latencyStats.windowSize, 50);
+  assert.equal(result.structuredContent.contextSavings.latencyStats.p95Ms, result.structuredContent.contextSavings.totalMs);
   assert.match(result.content[0].text, /Estimated context:/);
+  const second = await request('tools/call', { name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
+  assert.equal(second.structuredContent.contextSavings.latencyStats.sampleCount, 2);
   const explicit = await request('tools/call', { name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2, maxDepth: 1, reverse: false } });
   assert.equal(explicit.isError, undefined);
   assert.equal(explicit.structuredContent.entry.name, 'refreshToken');

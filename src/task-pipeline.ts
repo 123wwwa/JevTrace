@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Candidate, CodeNode, EdgeKind, JudgeCallStats, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
+import type { Candidate, CodeNode, EdgeKind, JudgeCallResult, JudgeCallStats, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
 import { discoverEntries, type DiscoveryOptions, type DiscoveryResult, type RepositoryIndex } from './discovery.js';
 import type { ContextItem, JudgeRoundTrace, RetrievalOptions, RetrievalResult } from './retrieve.js';
 
@@ -53,6 +53,11 @@ export interface TaskPipelineResult extends RetrievalResult {
 }
 
 const estimate = (node: CodeNode): number => Math.ceil((node.external ? node.signature.length : node.source.length) / 4);
+const signatureTokens = (node: CodeNode): number => Math.ceil(node.signature.length / 4);
+/** Cost charged against a pre-ranking cap: the body when it fits, else the signature it can still be reduced to. */
+const capCost = (used: number, item: NeighborhoodItem, cap: number): number | undefined =>
+  used + item.estimatedTokens <= cap ? item.estimatedTokens
+    : used + signatureTokens(item.node) <= cap ? signatureTokens(item.node) : undefined;
 const edgePrior: Record<EdgeKind, number> = {
   caller: 0.95,
   call: 0.92,
@@ -143,7 +148,14 @@ export async function retrieveTaskContext(
 
   for (const lead of discovery.semanticLeads.slice(0, maxLeads)) {
     options.signal?.throwIfAborted();
-    const node = adapter.findEntry({ file: lead.file, line: lead.line, endLine: lead.endLine, symbol: lead.name, score: lead.score });
+    let node: CodeNode;
+    try {
+      node = adapter.findEntry({ file: lead.file, line: lead.line, endLine: lead.endLine, symbol: lead.name, score: lead.score });
+    } catch (error) {
+      // One unresolvable lead must not discard the others.
+      warnings.push(`Semantic lead ${lead.file}:${lead.line} (${lead.name}) could not be resolved by the compiler: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
     semanticLeads.push(node);
     const leadItem: NeighborhoodItem = {
       node,
@@ -201,14 +213,19 @@ export async function retrieveTaskContext(
     let leadNodes = 1;
     merge(cappedCompiler, leadItem);
     for (const { item } of candidates) {
-      if (leadNodes >= perLeadNodeLimit || leadTokens + item.estimatedTokens > perLeadTokenBudget) {
+      const cost = capCost(leadTokens, item, perLeadTokenBudget);
+      if (leadNodes >= perLeadNodeLimit || cost === undefined) {
         perLeadPruned++;
         continue;
       }
       merge(cappedCompiler, item);
-      leadTokens += item.estimatedTokens;
+      leadTokens += cost;
       leadNodes++;
     }
+  }
+
+  if (!semanticLeads.length) {
+    return { task, status: 'incomplete', discovery, warnings: [...warnings, 'No semantic lead could be resolved by the compiler'] };
   }
 
   const rawCompilerItems = [...rawCompiler.values()];
@@ -218,8 +235,9 @@ export async function retrieveTaskContext(
   const beforeTotalCap = compilerItems.length;
   let cappedTokens = 0;
   compilerItems = compilerItems.filter(item => {
-    if (cappedTokens + item.estimatedTokens > neighborhoodTokenBudget) return false;
-    cappedTokens += item.estimatedTokens;
+    const cost = capCost(cappedTokens, item, neighborhoodTokenBudget);
+    if (cost === undefined) return false;
+    cappedTokens += cost;
     return true;
   });
   const totalPruned = beforeTotalCap - compilerItems.length;
@@ -293,20 +311,37 @@ export async function retrieveTaskContext(
         source: semanticLeads.map(node => `// semantic lead ${node.file}::${node.name}\n${node.source.slice(0, 1200)}`).join('\n\n'),
       };
       const contextStarted = performance.now();
-      const judged = contextJudge.rankContext
-        ? await contextJudge.rankContext(task, judgeCandidates, options.signal)
-        : contextJudge.judgeWithStats
-          ? await contextJudge.judgeWithStats(task, syntheticEntry, judgeCandidates, options.signal)
-          : { decisions: await contextJudge.judge(task, syntheticEntry, judgeCandidates, options.signal), stats: { batches: [] } };
-      contextRankingLatencyMs = performance.now() - contextStarted;
-      contextJudgeStats = judged.stats;
-
-      for (const item of rankingItems) {
-        const semantic = judged.decisions.get(item.node.id)?.score ?? 0;
-        item.semanticScore = semantic;
-        item.finalScore = 0.7 * semantic + 0.3 * item.structuralScore;
+      let judged: JudgeCallResult | undefined;
+      try {
+        judged = contextJudge.rankContext
+          ? await contextJudge.rankContext(task, judgeCandidates, options.signal)
+          : contextJudge.judgeWithStats
+            ? await contextJudge.judgeWithStats(task, syntheticEntry, judgeCandidates, options.signal)
+            : { decisions: await contextJudge.judge(task, syntheticEntry, judgeCandidates, options.signal), stats: { batches: [] } };
+      } catch (error) {
+        // Stage 4 only reorders an already-recovered pool; if it fails, the structural order still stands.
+        if (options.signal?.aborted) throw error;
+        warnings.push(`Context ranking failed (${error instanceof Error ? error.message : String(error)}); structural order was used`);
       }
-      contextRankingApplied = true;
+      contextRankingLatencyMs = performance.now() - contextStarted;
+
+      if (judged) {
+        contextJudgeStats = judged.stats;
+        let undecided = 0;
+        for (const item of rankingItems) {
+          const semantic = judged.decisions.get(item.node.id)?.score;
+          if (semantic === undefined) {
+            // A missing answer is not evidence of irrelevance: keep the structural score alone.
+            undecided++;
+            item.finalScore = item.structuralScore;
+            continue;
+          }
+          item.semanticScore = semantic;
+          item.finalScore = 0.7 * semantic + 0.3 * item.structuralScore;
+        }
+        if (undecided) warnings.push(`${undecided} context-ranking answers were missing or invalid; those candidates kept their structural score`);
+        contextRankingApplied = true;
+      }
     }
   }
 
@@ -320,15 +355,34 @@ export async function retrieveTaskContext(
     || a.depth - b.depth
     || a.node.id.localeCompare(b.node.id));
 
-  const selected: NeighborhoodItem[] = [];
-  const omittedPool: NeighborhoodItem[] = [];
+  // Budget allocation with a signature level. Pass 1 walks the ranking: a body when it fits, otherwise
+  // the signature, otherwise omitted. Pass 2 spends what is left upgrading signatures back to bodies in
+  // ranking order. (Starting large bodies at signature was tried and dropped: it demoted large owners
+  // such as jevgrep's selectFile that the task needs in full.)
+  const levels = new Map<NeighborhoodItem, 'body' | 'signature'>();
   let usedTokens = 0;
   for (const item of rankingItems) {
-    if (usedTokens + item.estimatedTokens <= tokenBudget) {
-      selected.push(item);
+    const signatureCost = signatureTokens(item.node);
+    if (!item.node.external && usedTokens + item.estimatedTokens <= tokenBudget) {
+      levels.set(item, 'body');
       usedTokens += item.estimatedTokens;
-    } else omittedPool.push(item);
+    } else if (usedTokens + signatureCost <= tokenBudget) {
+      levels.set(item, 'signature');
+      usedTokens += signatureCost;
+    }
   }
+  for (const item of rankingItems) {
+    if (levels.get(item) !== 'signature' || item.node.external) continue;
+    const extra = item.estimatedTokens - signatureTokens(item.node);
+    if (usedTokens + extra <= tokenBudget) {
+      levels.set(item, 'body');
+      usedTokens += extra;
+    }
+  }
+  const selected = rankingItems.filter(item => levels.has(item));
+  const omittedPool = rankingItems.filter(item => !levels.has(item));
+  const downgraded = selected.filter(item => levels.get(item) === 'signature' && !item.node.external).length;
+  if (downgraded) warnings.push(`${downgraded} ranking-pool candidates were reduced to signatures by final tokenBudget=${tokenBudget}`);
   if (omittedPool.length) warnings.push(`${omittedPool.length} ranking-pool candidates were omitted by final tokenBudget=${tokenBudget}`);
 
   const primaryLead = semanticLeads[0];
@@ -344,7 +398,7 @@ export async function retrieveTaskContext(
     depth: item.depth,
     score: item.finalScore,
   });
-  const items = selected.map(item => toContextItem(item, item.node.external ? 'signature' : 'body'));
+  const items = selected.map(item => toContextItem(item, levels.get(item)!));
   const omitted = omittedPool.map(item => toContextItem(item, 'omitted'));
   const batches = contextJudgeStats.batches;
   const judgeTrace: JudgeRoundTrace[] = contextRankingApplied ? [{

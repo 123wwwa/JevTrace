@@ -15,6 +15,11 @@ if (rootArgument >= 0 && !process.argv[rootArgument + 1]) {
   process.exit(1);
 }
 const root = rootArgument >= 0 ? path.resolve(process.argv[rootArgument + 1]) : process.cwd();
+// Fail at startup with the reason on stderr (which MCP hosts show in their logs), not at the first request.
+if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+  process.stderr.write(`jevtrace: project root is not a directory: ${root}\n`);
+  process.exit(1);
+}
 if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
   const argument = (name: string): string | undefined => {
     const index = process.argv.indexOf(name);
