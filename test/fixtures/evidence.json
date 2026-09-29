@@ -1,0 +1,6 @@
+{
+  "path": "src/auth.ts",
+  "leads": [
+    { "name": "refreshToken", "range": { "startLine": 3, "endLine": 6 }, "score": 0.9 }
+  ]
+}

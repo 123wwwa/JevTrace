@@ -1,0 +1,32 @@
+{
+  "name": "jevtrace",
+  "version": "0.1.0",
+  "description": "Dependency-aware JS/TS context retrieval for coding agents",
+  "type": "module",
+  "bin": { "jevtrace": "./dist/cli.js" },
+  "files": ["dist", "README.md", "skills", "docs"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node test/retrieve.test.mjs && node test/evaluate.test.mjs && node test/benchmark.test.mjs && node test/discovery.test.mjs",
+    "bench:smoke": "npm run build && node --env-file=.env test/benchmark.mjs",
+    "bench": "npm run build && node --env-file=.env test/benchmark-suite.mjs",
+    "bench:verbose": "npm run build && node --env-file=.env test/benchmark-suite.mjs --verbose",
+    "bench:choice": "npm run build && node --env-file=.env test/benchmark-suite.mjs --choice",
+    "bench:thresholds": "npm run build && node --env-file=.env test/benchmark-thresholds.mjs",
+    "bench:stability": "npm run build && node --env-file=.env test/benchmark-stability.mjs",
+    "bench:rounds": "npm run build && node --env-file=.env test/benchmark-suite.mjs --rounds",
+    "bench:batch-sizes": "npm run build && node --env-file=.env test/benchmark-batch-sizes.mjs",
+    "bench:real-suite": "npm run build && node --env-file-if-exists=.env scripts/real-suite.mjs",
+    "bench:stage4-sweep": "npm run build && node --env-file-if-exists=.env scripts/stage4-sweep.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "typescript": "^6.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": { "@types/node": "^24.0.0" },
+  "license": "MIT"
+}

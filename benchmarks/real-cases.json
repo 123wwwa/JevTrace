@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "labelPolicy": "minimum-required-context",
+  "repositories": {
+    "ky": { "root": "../../ky", "revision": "0d59458a0a58e1c3d7c6db0ab17ed5c7cd671e47" },
+    "jevgrep": { "root": "../../jevgrep/packages/core/src", "revision": "adbea4cc8560725f36a5f4bb8cc6fcce87d78185" }
+  },
+  "options": { "maxDepth": 2, "maxNodes": 200, "tokenBudget": 100000, "pipelineTokenBudget": 8000, "pipelinePerLeadTokenBudget": 8000, "pipelineNeighborhoodTokenBudget": 16000, "reverse": false, "reverseFanIn": 12, "maxCandidates": 64, "maxLeads": 4, "maxJevFiles": 256, "maxRelevantFiles": 8, "lexicalMergeLimit": 64 },
+  "cases": [
+    {
+      "id": "ky-retry-after", "split": "development", "repository": "ky",
+      "task": "Change how HTTP 429 retry delay is calculated from Retry-After",
+      "entry": { "file": "source/core/Ky.ts", "line": 567 },
+      "acceptableEntries": [{ "file": "source/core/Ky.ts", "line": 567 }],
+      "required": [
+        { "file": "source/core/Ky.ts", "name": "Ky.#calculateRetryDelay", "line": 567, "requiredLevel": "body" },
+        { "file": "source/utils/normalize.ts", "name": "normalizeRetryOptions", "line": 52, "requiredLevel": "body" },
+        { "file": "source/core/retry-timing.ts", "name": "getRetryTimingHeader", "line": 25, "requiredLevel": "body" },
+        { "file": "source/core/retry-timing.ts", "name": "calculateRetryTimingDelay", "line": 151, "requiredLevel": "body" }
+      ],
+      "rationale": "The retry branch owns HTTP status gating and timing caps; normalization supplies the retry policy; the two timing helpers select and parse server timing. This is a minimum investigation set, not an exhaustive gold graph."
+    },
+    {
+      "id": "ky-timeout-cleanup", "split": "development", "repository": "ky",
+      "task": "Ensure the request timeout timer is cleared when fetch throws synchronously so it cannot abort a later retry",
+      "entry": { "file": "source/utils/timeout.ts", "line": 11 },
+      "acceptableEntries": [{ "file": "source/utils/timeout.ts", "line": 11 }],
+      "required": [
+        { "file": "source/utils/timeout.ts", "name": "timeout", "line": 11, "requiredLevel": "body" },
+        { "file": "source/errors/TimeoutError.ts", "name": "TimeoutError", "line": 7, "requiredLevel": "signature" }
+      ],
+      "rationale": "The timeout utility owns timer creation, fetch invocation and finally cleanup; the thrown error's contract is supporting context."
+    },
+    {
+      "id": "jevgrep-cache-validation", "split": "development", "repository": "jevgrep",
+      "task": "Change evaluation cache reads to reject expired entries and corrupt cached answers while treating missing cache files as misses",
+      "entry": { "file": "cache.ts", "line": 46 },
+      "acceptableEntries": [{ "file": "cache.ts", "line": 46 }],
+      "required": [
+        { "file": "cache.ts", "name": "createEvaluationCache", "line": 46, "requiredLevel": "body" },
+        { "file": "cache.ts", "name": "validAnswers", "line": 33, "requiredLevel": "body" },
+        { "file": "cache.ts", "name": "missing", "line": 41, "requiredLevel": "body" }
+      ],
+      "rationale": "The cache factory contains read and TTL policy; its answer validator and missing-file classifier control corrupt versus missing outcomes."
+    },
+    {
+      "id": "jevgrep-selection-evidence", "split": "development", "repository": "jevgrep",
+      "task": "Change file selection so overlapping selected source ranges are merged while declaration evidence questions still receive the current implementation",
+      "entry": { "file": "selection.ts", "line": 37 },
+      "acceptableEntries": [{ "file": "selection.ts", "line": 37 }],
+      "required": [
+        { "file": "selection.ts", "name": "selectFile", "line": 37, "requiredLevel": "body" },
+        { "file": "selection.ts", "name": "mergeSpans", "line": 23, "requiredLevel": "body" },
+        { "file": "requests.ts", "name": "evidenceRequest", "line": 4, "requiredLevel": "body" }
+      ],
+      "rationale": "selectFile builds evidence requests and consumes selected ranges; mergeSpans implements overlap handling; evidenceRequest defines declaration-level questions."
+    }
+  ]
+}
