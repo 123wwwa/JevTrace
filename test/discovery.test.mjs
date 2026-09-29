@@ -40,6 +40,32 @@ function fixture(t) {
   return root;
 }
 
+test('repository discovery and compiler resolution support multiple named tsconfig projects', t => {
+  const root = fixture(t);
+  fs.mkdirSync(path.join(root, 'ui'));
+  fs.writeFileSync(path.join(root, 'tsconfig.ui.json'), JSON.stringify({
+    compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler' },
+    include: ['ui'],
+  }));
+  fs.writeFileSync(path.join(root, 'ui/context-savings.ts'), 'import { decodeJWT } from "../src/token";\nexport function renderSavings(token: string) { return decodeJWT(token); }\n');
+
+  const index = new RepositoryIndex(root);
+  const inventory = index.scan(100);
+  assert.ok(inventory.nodes.some(node => node.file === 'ui/context-savings.ts' && node.name === 'renderSavings'));
+  assert.ok(!inventory.nodes.some(node => node.file === 'ignored.ts'));
+
+  const adapter = new TypeScriptAdapter(root);
+  const entry = adapter.findEntry({ file: 'ui/context-savings.ts', symbol: 'renderSavings' });
+  assert.equal(entry.name, 'renderSavings');
+  assert.ok(adapter.dependencies(entry).edges.some(edge => edge.target.name === 'decodeJWT'));
+});
+
+test('explicit entry resolution rejects missing files before TypeScript project loading', t => {
+  const root = fixture(t);
+  const adapter = new TypeScriptAdapter(root);
+  assert.throws(() => adapter.findEntry({ file: 'src/does-not-exist.ts', line: 1 }), /Entry file does not exist/);
+});
+
 test('task-only query selects semantic leads independently of the lexical pool and follows typed imports', async t => {
   const root = fixture(t);
   const judge = semanticJudge();
@@ -270,13 +296,31 @@ test('MCP exposes discovery and accepts task-only retrieval through its wire sch
   await client.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
   const listed = await request('tools/list', {});
   assert.ok(listed.tools.some(tool => tool.name === 'discover_entries'));
+  assert.ok(listed.tools.some(tool => tool.name === 'retrieve_from_entry'));
+  const retrievalTool = listed.tools.find(tool => tool.name === 'retrieve_dependency_context');
+  assert.equal(retrievalTool?._meta?.ui?.resourceUri, 'ui://jevtrace/context-savings.html');
+  assert.equal(retrievalTool?.inputSchema?.properties?.file, undefined);
+  const resources = await request('resources/list', {});
+  assert.ok(resources.resources.some(resource => resource.uri === 'ui://jevtrace/context-savings.html'));
+  const ui = await request('resources/read', { uri: 'ui://jevtrace/context-savings.html' });
+  assert.match(ui.contents[0].mimeType, /mcp-app/);
+  assert.match(ui.contents[0].text, /JevTrace Context Savings/);
   const discovered = await request('tools/call', { name: 'discover_entries', arguments: { task: 'refresh token' } });
   assert.equal(discovered.isError, undefined);
   assert.equal(discovered.structuredContent.mode, 'lexical');
   assert.equal(discovered.structuredContent.selected.name, discovered.structuredContent.lexicalCandidates[0].name);
-  const result = await request('tools/call', { name: 'retrieve_dependency_context', arguments: { task: 'refresh token', maxDepth: 1, reverse: false } });
+  const result = await request('tools/call', { name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
   assert.equal(result.isError, undefined);
   assert.ok(result.structuredContent.items.some(item => item.node.name === 'decodeJWT'));
+  assert.equal(result.structuredContent.contextSavings.estimated, true);
+  assert.equal(result.structuredContent.contextSavings.available, true);
+  assert.equal(result.structuredContent.contextSavings.candidateTokens, result.structuredContent.rankingPool.stats.tokens);
+  assert.equal(result.structuredContent.contextSavings.returnedTokens, result.structuredContent.usedTokens);
+  assert.match(result.content[0].text, /Estimated context:/);
+  const explicit = await request('tools/call', { name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2, maxDepth: 1, reverse: false } });
+  assert.equal(explicit.isError, undefined);
+  assert.equal(explicit.structuredContent.entry.name, 'refreshToken');
+  assert.equal(explicit.structuredContent.contextSavings, undefined);
 });
 
 test('real-task metrics distinguish entry rank and missing required bodies', () => {

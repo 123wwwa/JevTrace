@@ -3,6 +3,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import ts from 'typescript';
 import type { CodeNode, JudgeCallStats, LanguageAdapter, RelevanceJudge } from './types.js';
+import { parseProjectConfigs } from './project-config.js';
 
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo']);
 const sourceFile = /\.[cm]?[jt]sx?$/;
@@ -128,26 +129,11 @@ export class RepositoryIndex {
     const nodes: CodeNode[] = [];
     const warnings: string[] = [];
     const seen = new Set<string>();
-    const projects = new Map<string, Set<string> | undefined>();
     const root = path.resolve(this.root);
-    const insideRoot = (file: string) => {
-      const relative = path.relative(root, file);
-      return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-    };
-    const inProject = (file: string): boolean => {
-      const config = ts.findConfigFile(path.dirname(file), ts.sys.fileExists);
-      if (!config || !insideRoot(config)) return true;
-      if (!projects.has(config)) {
-        const raw = ts.readConfigFile(config, ts.sys.readFile);
-        const parsed = raw.error ? undefined : ts.parseJsonConfigFileContent(raw.config, ts.sys, path.dirname(config));
-        const errors = raw.error ? [raw.error] : parsed?.errors ?? [];
-        if (errors.length) {
-          warnings.push(`Skipped project ${path.relative(this.root, config)}: ${ts.flattenDiagnosticMessageText(errors[0].messageText, ' ')}`);
-          projects.set(config, undefined);
-        } else projects.set(config, new Set(parsed!.fileNames.map(fileName => path.resolve(fileName))));
-      }
-      return projects.get(config)?.has(path.resolve(file)) ?? false;
-    };
+    const projectInventory = parseProjectConfigs(root);
+    warnings.push(...projectInventory.warnings);
+    const configuredFiles = new Set(projectInventory.projects.flatMap(project => [...project.files]));
+    const hasConfiguredProjects = projectInventory.projects.length > 0;
 
     let scannedFiles = 0;
     const walk = (directory: string): void => {
@@ -163,7 +149,7 @@ export class RepositoryIndex {
           walk(full);
         } else if (entry.isFile() && sourceFile.test(entry.name) && !declarationFile.test(entry.name)) {
           scannedFiles++;
-          if (!inProject(full)) continue;
+          if (hasConfiguredProjects && !configuredFiles.has(path.resolve(full))) continue;
           if (fs.statSync(full).size > 1024 * 1024) {
             warnings.push(`Skipped source larger than 1 MiB: ${path.relative(this.root, full)}`);
             continue;

@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import ts from 'typescript';
 import type { CodeNode, Dependency, DependencyScan, EdgeKind, EntryInput, LanguageAdapter, SourceLocation, SupportingContext, Unresolved } from './types.js';
+import { parseProjectConfigs, selectProjectFromParsed, type ParsedProjectConfig } from './project-config.js';
 
 const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next']);
@@ -52,7 +53,10 @@ export class TypeScriptAdapter implements LanguageAdapter {
   private checker?: ts.TypeChecker;
   private projectKey?: string;
   private service?: ts.LanguageService;
-  constructor(readonly root: string) {}
+  private readonly projectConfigs: ParsedProjectConfig[];
+  constructor(readonly root: string) {
+    this.projectConfigs = parseProjectConfigs(root).projects;
+  }
 
   findEntry(input: EntryInput): CodeNode {
     const absolute = this.safePath(input.file);
@@ -81,6 +85,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
   }
 
   dependencies(node: CodeNode): DependencyScan {
+    if (!node.external) this.loadProgram(this.safePath(node.file));
     const source = this.program?.getSourceFile(path.resolve(this.root, node.file));
     const owner = source && this.findNode(source, node);
     if (!owner || !source || !this.checker || node.external) return { edges: [], unresolved: [] };
@@ -114,6 +119,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
   }
 
   reverseDependencies(node: CodeNode): DependencyScan {
+    if (!node.external) this.loadProgram(this.safePath(node.file));
     if (!this.program || !this.service) return { edges: [], unresolved: [] };
     const entrySource = this.program.getSourceFile(path.resolve(this.root, node.file));
     const entryDeclaration = entrySource && this.findNode(entrySource, node);
@@ -224,6 +230,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
   }
 
   supportingContext(node: CodeNode): SupportingContext[] {
+    if (!node.external) this.loadProgram(this.safePath(node.file));
     const source = this.program?.getSourceFile(path.resolve(this.root, node.file));
     const owner = source && this.findNode(source, node);
     if (!source || !owner || !this.checker || node.external) return [];
@@ -284,19 +291,15 @@ export class TypeScriptAdapter implements LanguageAdapter {
   }
 
   private loadProgram(entry: string): void {
-    const found = ts.findConfigFile(path.dirname(entry), ts.sys.fileExists, 'tsconfig.json');
-    const configPath = found && this.insideRoot(found) ? found : undefined;
+    const project = selectProjectFromParsed(this.projectConfigs, entry);
+    const configPath = project?.path;
     let files: string[];
     let options: ts.CompilerOptions;
     let projectReferences: readonly ts.ProjectReference[] | undefined;
-    if (configPath) {
-      const config = ts.readConfigFile(configPath, ts.sys.readFile);
-      if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
-      const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(configPath));
-      if (parsed.errors.length) throw new Error(ts.flattenDiagnosticMessageText(parsed.errors[0].messageText, '\n'));
-      files = parsed.fileNames;
-      options = parsed.options;
-      projectReferences = parsed.projectReferences;
+    if (project) {
+      files = project.parsed.fileNames;
+      options = project.parsed.options;
+      projectReferences = project.parsed.projectReferences;
     } else {
       files = [];
       collectSources(this.root, files);
@@ -338,6 +341,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
   private safePath(file: string): string {
     const absolute = path.resolve(this.root, file);
     if (!this.insideRoot(absolute)) throw new Error('Entry file must be inside project root');
+    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) throw new Error(`Entry file does not exist: ${file}`);
     return absolute;
   }
   private insideRoot(file: string): boolean {

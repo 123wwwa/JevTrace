@@ -114,19 +114,32 @@ The repository also ships an [agent skill](skills/jevtrace/SKILL.md) describing 
 
 ## MCP input
 
-`retrieve_dependency_context` accepts `task` alone for discovery, or `task` with one of:
+`retrieve_dependency_context` is the primary **task-only** MCP tool. It accepts a natural-language coding task and always runs JevTrace's repository discovery before compiler expansion and final budget selection. The tool intentionally does not accept `file` or `line`, so an agent cannot silently bypass discovery by inventing an entry location.
 
-- `file` plus `line` (optional `endLine`)
-- `file` plus `symbol` as a compatibility fallback
-- `evidence: { path, leads: [{ name, range: { startLine, endLine }, score }] }`, JevTrace's structured lead format. The highest-scoring lead is used.
+`retrieve_from_entry` is the explicit-entry compatibility tool. Use it only when the caller already has a trusted `file` + `line`, `file` + `symbol`, or structured `evidence: { path, leads[] }` from the user or another tool.
 
-`discover_entries` exposes both parallel discovery paths without running compiler expansion or final context selection. It returns `lexicalCandidates` from the local RRF retriever, `directoryLeads` from Jev tree-level scope selection, `fileLeads` from files inside the selected scopes, and diversity-selected `semanticLeads` from symbols inside those files. Both tools accept `maxCandidates` (default 64), `maxLeads` (default 4), `maxFiles` (default 3000), `maxRelevantDirectories` (default 8), `maxJevFiles` (default 256 after directory selection), and `maxRelevantFiles` (default 8). Lexical hints are visible to Jev but never restrict the semantic search space. Semantic thresholds remain provisional and have not been calibrated on a held-out real-task set.
+`discover_entries` exposes semantic discovery without running compiler expansion or final context selection. It returns `lexicalCandidates` from the local RRF retriever, `directoryLeads` from Jev tree-level scope selection, `fileLeads` from files inside the selected scopes, and diversity-selected `semanticLeads` from symbols inside those files. Both discovery/retrieval tools accept `maxCandidates` (default 64), `maxLeads` (default 4), `maxFiles` (default 3000), `maxRelevantDirectories` (default 8), `maxJevFiles` (default 256 after directory selection), and `maxRelevantFiles` (default 8). Lexical hints are visible to Jev but never restrict the semantic search space. Semantic thresholds remain provisional and have not been calibrated on a held-out real-task set.
 
 For task-only retrieval, `tokenBudget` (default 8000 estimated tokens) is the final coding-agent context budget. `perLeadNodeLimit` (default 24), `perLeadTokenBudget` (defaulting to the final budget), `reverseFanIn` (default 12), and `neighborhoodTokenBudget` (default twice the final budget) bound compiler expansion before remote context ranking. The default final pool is now the compiler neighborhood; lexical candidates still guide discovery but are not merged into the final pool unless explicitly enabled (`--lexical-final-merge` in the CLI or `includeLexicalParallel=true` over MCP). `contextRanking=jev` calls Stage 4 only when that final pool exceeds `tokenBudget`; `contextRanking=structural` disables Stage 4. Explicit file/line retrieval retains the older `maxDepth`, `maxNodes`, threshold, reverse, wrapper-lookahead, and visit-policy controls.
 
+### Context savings UI (MCP Apps)
+
+`retrieve_dependency_context` also publishes an MCP Apps view at `ui://jevtrace/context-savings.html`. Hosts that support MCP Apps can render the retrieval result as an inline dashboard; other hosts continue to receive the same text and structured content.
+
+The dashboard reports:
+
+- estimated candidate-pool tokens versus estimated returned-context tokens;
+- excluded tokens and reduction percentage;
+- token-budget utilization and returned/candidate symbol counts;
+- semantic-lead count, raw/capped compiler-neighborhood tokens, and whether Stage 4 ran;
+- provider request count plus discovery, Stage 4, and total retrieval latency;
+- a short list of the implementation symbols actually returned to the coding agent.
+
+The reduction number is deliberately scoped to `final ranking pool -> returned context`. Token counts use JevTrace's source-size estimator (approximately characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. The dashboard is attached to the task-only tool; explicit-entry compatibility retrieval remains available separately through `retrieve_from_entry` and does not present a task-only reduction claim.
+
 ## Architecture
 
-0. **Lexical-assisted repository discovery:** Scan supported JS/TS files for callable declarations and cache compiler-derived fields. Local retrieval computes BM25F over symbol name, path, signature, referenced identifiers, and literals, then fuses that with exact and path matching through reciprocal-rank fusion. Jev independently scores repository directory scopes, files inside selected scopes, and symbols inside selected files. Lexical top results may be supplied as hints, but they never constrain Jev's candidate space. `maxJevFiles` applies after semantic directory selection, not before it. If there is only one possible directory scope, JevTrace now selects it directly instead of paying for a redundant directory-ranking call.
+0. **Lexical-assisted repository discovery:** Scan supported JS/TS files for callable declarations and cache compiler-derived fields. Repositories with multiple TypeScript projects are indexed across the union of `tsconfig*.json` files, so separate app/UI/package configs participate in the same task-only discovery. Local retrieval computes BM25F over symbol name, path, signature, referenced identifiers, and literals, then fuses that with exact and path matching through reciprocal-rank fusion. Jev independently scores repository directory scopes, files inside selected scopes, and symbols inside selected files. Lexical top results may be supplied as hints, but they never constrain Jev's candidate space. `maxJevFiles` applies after semantic directory selection, not before it. If there is only one possible directory scope, JevTrace now selects it directly instead of paying for a redundant directory-ranking call.
 
 1. **Diverse semantic leads:** JevTrace keeps up to four qualifying Jev symbol leads rather than forcing one canonical entry. A best-effort diversity rule compares one-hop compiler neighborhoods and suppresses candidates whose local graph substantially overlaps an already selected lead, allowing later candidates to add structural coverage.
 2. **Compiler shallow expansion:** Each Jev semantic lead is resolved with the TypeScript `Program`, `TypeChecker`, and `LanguageService`. JevTrace collects one-hop calls, methods, constructors, JSX, imports/types, callers, and tests, follows import aliases across files, caps reverse fan-in, then merges duplicate nodes across leads. Repeated ablations on the current development set show that this stage is doing substantive recovery rather than cosmetic expansion.
