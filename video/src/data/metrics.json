@@ -1,0 +1,9 @@
+{
+  "agentTasks": 5,
+  "agentTokensWithout": 119713,
+  "agentTokensWith": 49511,
+  "searchesWithout": 6,
+  "searchesWith": 0,
+  "recallTasks": 19,
+  "recall": 98.2
+}

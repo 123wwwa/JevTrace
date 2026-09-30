@@ -1,0 +1,28 @@
+{
+  "name": "jevtrace-video",
+  "private": true,
+  "description": "30-second JevTrace explainer rendered with Remotion from a recorded JevTrace run and benchmark numbers",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio",
+    "prestudio": "node scripts/generate-music.mjs",
+    "render": "remotion render JevTraceShort out/jevtrace.mp4",
+    "prerender": "node scripts/generate-music.mjs",
+    "still": "remotion still JevTraceShort out/poster.png --frame=560",
+    "build:page": "node scripts/build-page.mjs",
+    "capture": "node --env-file=../.env scripts/capture-demo.mjs",
+    "music": "node scripts/generate-music.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.530",
+    "@remotion/google-fonts": "4.0.530",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.530"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.9.3"
+  }
+}

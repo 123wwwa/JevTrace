@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# `jg` for the agent benchmark on Windows: jevgrep supports macOS/Linux only, so this runs the pinned
+# jevgrep 0.7.0 image (benchmarks/competitor/Dockerfile) on the agent's working directory.
+#   JG_SHIM_ROOT   repository the agent works in (Windows path)
+#   JG_SHIM_OUT    directory for provider usage records (read by scripts/agent-benchmark.mjs)
+#   JG_SHIM_BENCH  benchmarks/competitor (for probe.mjs)
+#   OPENROUTER_API_KEY
+set -uo pipefail
+root_win="${JG_SHIM_ROOT:?}"
+root_posix="$(cygpath -u "$root_win" 2>/dev/null || echo "$root_win")"
+# Paths the agent passes are relative to its working directory; map absolute ones into the container copy.
+args=()
+for arg in "$@"; do
+  for prefix in "$root_win" "${root_win//\\//}" "$root_posix"; do
+    if [[ "$arg" == "$prefix"* ]]; then arg=".${arg#"$prefix"}"; arg="${arg//\\//}"; break; fi
+  done
+  args+=("$arg")
+done
+calls=$(ls "$JG_SHIM_OUT"/jg-*.usage.jsonl 2>/dev/null | wc -l)
+# Copy the checkout onto the container's own disk first, as the retrieval benchmark does: reading through a
+# Windows bind mount made jevgrep about three times slower. node_modules and .git, which jevgrep ignores,
+# are left out: copying them through the mount took minutes.
+MSYS_NO_PATHCONV=1 exec docker run --rm -i \
+  -e OPENROUTER_API_KEY -e "JEVGREP_PROBE_OUT=/out/jg-$((calls + 1)).usage.jsonl" \
+  -v "$root_win:/repos/repo:ro" -v "$(cygpath -w "$JG_SHIM_OUT"):/out" -v "$(cygpath -w "$JG_SHIM_BENCH"):/bench:ro" \
+  jevtrace-bench-jevgrep:0.7.0 sh -c '
+    printf "%s" "$OPENROUTER_API_KEY" | jg auth --provider openrouter --stdin >/dev/null || exit 1
+    mkdir -p /work/repo && tar -C /repos/repo --exclude=./node_modules --exclude=./.git -cf - . | tar -C /work/repo -xf - && cd /work/repo
+    NODE_OPTIONS="--import /bench/probe.mjs" exec jg "$@"' jg "${args[@]}"

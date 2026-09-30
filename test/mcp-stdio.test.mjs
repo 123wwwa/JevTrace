@@ -1,6 +1,7 @@
 // End-to-end MCP check over real stdio: the server runs as a child process exactly as an MCP host starts it.
 // Tests must never write to the real usage log in the home directory.
 process.env.JEVTRACE_USAGE_LOG = 'off';
+process.env.JEVTRACE_CONFIG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -33,7 +34,7 @@ async function connect(t, root, env = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [cli, '--root', root],
-    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', ...env },
+    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', JEVTRACE_CONFIG: 'off', ...env },
     stderr: 'pipe',
   });
   let stderr = '';
@@ -157,7 +158,7 @@ test('edge-case repositories produce answers or clear errors, never a dead serve
 
 test('a root that does not exist refuses to start and says why on stderr', async () => {
   const missing = path.join(os.tmpdir(), `jevtrace-missing-${process.pid}-${Date.now()}`);
-  const transport = new StdioClientTransport({ command: process.execPath, args: [cli, '--root', missing], env: getDefaultEnvironment(), stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [cli, '--root', missing], env: { ...getDefaultEnvironment(), JEVTRACE_CONFIG: 'off' }, stderr: 'pipe' });
   let stderr = '';
   transport.stderr?.on('data', chunk => { stderr += chunk; });
   const client = new Client({ name: 'stdio-test', version: '1.0.0' });
@@ -211,7 +212,7 @@ test('without --root the server follows CLAUDE_PROJECT_DIR, as Claude Code user-
     command: process.execPath,
     args: [cli],
     cwd: os.tmpdir(),
-    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', CLAUDE_PROJECT_DIR: root },
+    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', JEVTRACE_CONFIG: 'off', CLAUDE_PROJECT_DIR: root },
     stderr: 'pipe',
   });
   const client = new Client({ name: 'stdio-test', version: '1.0.0' });
@@ -250,7 +251,7 @@ test('tool calls are logged locally and `jevtrace stats` summarizes them with Cl
   fs.writeFileSync(path.join(sessionDir, 'b.jsonl'), [toolUse('Grep'), toolUse('Read')].join('\n'));
   const { execFileSync } = await import('node:child_process');
   const output = execFileSync(process.execPath, [cli, 'stats', '--days', '1'], { encoding: 'utf8',
-    env: { ...process.env, JEVTRACE_USAGE_LOG: logFile, CLAUDE_CONFIG_DIR: claudeDir } });
+    env: { ...process.env, JEVTRACE_USAGE_LOG: logFile, JEVTRACE_CONFIG: 'off', CLAUDE_CONFIG_DIR: claudeDir } });
   assert.match(output, /Tool calls: 3 \(retrieve_dependency_context 2, retrieve_from_entry 1\)/);
   assert.match(output, /failed: 1, no relevant code found: 1/);
   assert.match(output, /used JevTrace: 1/);

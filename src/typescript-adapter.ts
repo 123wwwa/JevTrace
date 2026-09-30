@@ -220,8 +220,8 @@ export class TypeScriptAdapter implements LanguageAdapter {
     if (!owner || !source || !this.checker || node.external) return { edges: [], unresolved: [] };
     const edges = new Map<string, Dependency>();
     const unresolved: Unresolved[] = [];
-    const add = (expression: ts.Node, kind: EdgeKind, siteNode: ts.Node) => {
-      let symbol = this.checker!.getSymbolAtLocation(expression);
+    const add = (expression: ts.Node, kind: EdgeKind, siteNode: ts.Node, resolved?: ts.Symbol) => {
+      let symbol = resolved ?? this.checker!.getSymbolAtLocation(expression);
       const site = this.location(source, siteNode);
       if (!symbol) { unresolved.push({ kind, site, expression: expression.getText(source), reason: 'no symbol' }); return; }
       const alias = (symbol.flags & ts.SymbolFlags.Alias) !== 0;
@@ -248,7 +248,25 @@ export class TypeScriptAdapter implements LanguageAdapter {
       else if (ts.isExpressionWithTypeArguments(current) && ts.isHeritageClause(current.parent)) {
         add(ts.isPropertyAccessExpression(current.expression) ? current.expression.name : current.expression, 'type', current);
       } else if (values && ts.isIdentifier(current) && isModuleConstant(current)) add(current, 'value', current);
+      // The instance state a method works on: `this.bodyCache`, or `const { bodyCache } = this`.
+      else if (values && ts.isPropertyAccessExpression(current) && current.expression.kind === ts.SyntaxKind.ThisKeyword) {
+        const symbol = this.checker!.getSymbolAtLocation(current.name);
+        if (isStateField(symbol)) add(current.name, 'value', current, symbol);
+      } else if (values && ts.isVariableDeclaration(current) && ts.isObjectBindingPattern(current.name) && current.initializer?.kind === ts.SyntaxKind.ThisKeyword) {
+        const type = this.checker!.getTypeAtLocation(current.initializer);
+        for (const element of current.name.elements) {
+          const key = element.propertyName ?? element.name;
+          const symbol = ts.isIdentifier(key) ? type.getProperty(key.text) : undefined;
+          if (isStateField(symbol)) add(key, 'value', element, symbol);
+        }
+      }
       ts.forEachChild(current, visit);
+    };
+    // A data field of a class; function-valued properties are reached through their calls instead.
+    const isStateField = (symbol: ts.Symbol | undefined): symbol is ts.Symbol => {
+      const declaration = symbol?.valueDeclaration;
+      return declaration !== undefined && ts.isPropertyDeclaration(declaration)
+        && !(declaration.initializer && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer)));
     };
     // A reference to a top-level `const` whose initializer is data rather than a function (configuration
     // objects, lookup tables, defaults). Function-valued constants are already reached through calls.

@@ -2,12 +2,20 @@ node_modules/
 dist/
 skills/
 *.tsbuildinfo
+.claude/
+.vscode/
 .env
 .env.*
 !.env.example
 .npm-cache/
 benchmarks/results/
+# Extracted from the jevgrep image by scripts/agent-benchmark.mjs; jevgrep's file, not ours.
+benchmarks/competitor/skill/
 coverage/
 *.log
 .DS_Store
 test/ui-host/generated/
+# Remotion renders, the assembled Pages site and the synthesized music (all rebuilt in CI)
+video/out/
+video/site/
+video/public/audio/

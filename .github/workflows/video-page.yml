@@ -1,0 +1,53 @@
+# Renders the JevTrace explainer (video/, Remotion) and publishes it with a landing page on GitHub Pages.
+# The video renders from the committed data in video/src/data (a recorded JevTrace run and the benchmark
+# numbers), so this needs no provider key. Enable it once under Settings → Pages → Source: GitHub Actions.
+name: Video page
+
+on:
+  push:
+    branches: [main]
+    paths: ['video/**', '.github/workflows/video-page.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: video
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: video/package-lock.json
+      - run: npm ci
+      - run: npx remotion browser ensure
+      - run: npm run typecheck
+      - run: npm run render
+      - run: npm run still
+      - run: npm run build:page
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: video/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

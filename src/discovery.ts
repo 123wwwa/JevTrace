@@ -46,6 +46,8 @@ interface SearchFields {
 
 const testFile = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
 type ScanResult ={ nodes: CodeNode[]; scannedFiles: number; warnings: string[] };
+/** A lead that overlaps an earlier one still wins a slot over a diverse lead scored more than this below it. */
+const diversityMargin = 0.1;
 /** A directory scope is split into child scopes once its subtree holds more files than this. */
 const maxScopeFiles = 64;
 
@@ -684,6 +686,12 @@ export async function discoverEntries(
     };
 
     for (const lead of eligible) {
+      // Diversity must not buy a much weaker lead: a lead Jev scored clearly higher that only overlaps an
+      // earlier one goes first. Without this, `#cachedBody`'s callers `text()` and `json()` (0.91, 0.84)
+      // lost their slots to two unrelated Lambda-adapter `createRequest`s (0.70) that merely didn't overlap.
+      while (semanticLeads.length < maxLeads && deferred.length && (deferred[0].score ?? 0) - (lead.score ?? 0) > diversityMargin) {
+        semanticLeads.push(deferred.shift()!);
+      }
       if (semanticLeads.length >= maxLeads) break;
       const candidateGraph = graphSet(lead);
       const overlaps = semanticLeads.some(selected => {

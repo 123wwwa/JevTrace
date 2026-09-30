@@ -44,16 +44,16 @@
       <h1>Jev<span>Trace</span></h1>
       <p>Give a coding agent the task, not a file. Jev picks the declarations that matter; the TypeScript compiler follows their callers, callees, types and tests; the agent gets one bounded context packet.</p>
       <div class="numbers">
-        <div class="stat"><b>59%</b><small>less context a coding<br>agent reads</small></div>
-        <div class="stat"><b>0</b><small>repository searches<br>(6 without)</small></div>
-        <div class="stat"><b>98%</b><small>of the code a task<br>needs, found</small></div>
+        <div class="stat"><b>{{reduction}}%</b><small>less context a coding<br>agent reads</small></div>
+        <div class="stat"><b>{{searchesWith}}</b><small>repository searches<br>({{searchesWithout}} without)</small></div>
+        <div class="stat"><b>{{recallRounded}}%</b><small>of the code a task<br>needs, found</small></div>
       </div>
       <div class="links">
         <a class="primary" href="https://github.com/123wwwa/JevTrace">GitHub</a>
         <a href="https://github.com/123wwwa/JevTrace/blob/main/docs/agent-benchmark.md">Benchmark</a>
         <a href="jevtrace.mp4" download>Download MP4</a>
       </div>
-      <footer>Less context: the same Claude Code agent with and without JevTrace, median over 5 JS/TS tasks (a pilot). Code found: 98.2% of the labelled declarations across 19 JS/TS tasks. Labels written by the JevTrace authors. The video's graph is a recorded JevTrace run on hono (2026-09-30).</footer>
+      <footer>Less context: the same Claude Code agent with and without JevTrace, median over {{agentTasks}} JS/TS tasks (a pilot). Code found: {{recall}}% of the labelled declarations across {{recallTasks}} JS/TS tasks. Labels written by the JevTrace authors. The video's graph is a recorded JevTrace run on {{repository}} ({{capturedAt}}).</footer>
     </section>
   </main>
   <script>

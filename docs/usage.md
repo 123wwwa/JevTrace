@@ -56,20 +56,32 @@ The `--evidence` option is JevTrace's own structured lead format for integration
 
 ## Jev provider and model
 
-JevTrace defaults to OpenRouter, but provider and model selection are independent configuration. CLI queries accept `--provider` and `--model`. MCP hosts configure the same values through environment variables.
+There is no default provider: choose one once with `setup`, which asks for the platform, the API key (hidden while you type), and optionally a model, checks the key with one small request, and saves it:
+
+```bash
+node dist/cli.js setup
+```
+
+The choice is saved to `~/.jevtrace/config.json`, readable only by you (set `JEVTRACE_CONFIG` to move it, or `off` to ignore it). Running `query` in a terminal with nothing configured starts `setup` first. The environment still works and takes precedence, in this order:
+
+1. `--provider`, `--model`, `--endpoint` on the CLI;
+2. `JEVTRACE_PROVIDER`, `JEVTRACE_MODEL`, `JEVTRACE_ENDPOINT` and the provider's key variable (from the shell or `node --env-file=.env`); if only one provider key is set and no provider is named, that provider is used;
+3. the saved config. Its key is used only for the provider it was saved with.
+
+With none of these, tools return an error that says to run `setup` (or use `--offline`).
 
 | Provider | `JEVTRACE_PROVIDER` | Credential | Default model | Endpoint |
 | --- | --- | --- | --- | --- |
+| OpenCode Zen | `opencode` | `OPENCODE_API_KEY` | `jev-1.13` | `https://opencode.ai/zen/v1/systemone` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `typesafe/jev-1.13` | `https://openrouter.ai/api/alpha/decisions` |
 | TypeSafe | `typesafe` | `TYPESAFE_API_KEY` | `jev-latest` | `https://api.typesafe.ai/v1/systemone` |
 | Vercel AI Gateway | `vercel` | `AI_GATEWAY_API_KEY` | `typesafe-ai/jev` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` |
-| OpenCode Zen | `opencode` | `OPENCODE_API_KEY` | `jev-1.13` | `https://opencode.ai/zen/v1/systemone` |
 | Custom | `custom` | optional `JEVTRACE_API_KEY` | `jev-latest` unless overridden | `JEVTRACE_ENDPOINT` |
 
 `JEVTRACE_MODEL` overrides the provider's default model and `JEVTRACE_ENDPOINT` overrides its endpoint. A custom endpoint must implement the TypeSafe/System One `state + questions -> answers` contract. OpenRouter uses its Decisions API, while TypeSafe, Vercel, and custom presets use System One-compatible endpoints; JevTrace normalizes their shared Noul answer shape. This does **not** mean arbitrary chat LLMs are supported yet; alternate generative-model judges need a separate score/calibration policy.
 
 ```bash
-# OpenRouter (default)
+# OpenRouter
 OPENROUTER_API_KEY=... node dist/cli.js query ...
 
 # TypeSafe direct
@@ -106,11 +118,13 @@ This repository's `.vscode/mcp.json` runs the server against the checkout itself
 
 ### Claude Code
 
-Register once for all your projects. Without `--root`, the server searches the project Claude Code is working in (it reads `CLAUDE_PROJECT_DIR`, which Claude Code sets for MCP servers; user-scope servers otherwise start in `~/.claude`). `--env-file` lets Node read the key from a `.env` file instead of storing it in Claude Code's configuration:
+Register once for all your projects. Without `--root`, the server searches the project Claude Code is working in (it reads `CLAUDE_PROJECT_DIR`, which Claude Code sets for MCP servers; user-scope servers otherwise start in `~/.claude`). After `setup`, the server reads the saved provider and key, so nothing secret goes into Claude Code's configuration:
 
 ```bash
-claude mcp add jevtrace --scope user -- node --env-file=/absolute/JevTrace/.env /absolute/JevTrace/dist/cli.js
+claude mcp add jevtrace --scope user -- node /absolute/JevTrace/dist/cli.js
 ```
+
+To keep using a `.env` file instead, add `--env-file=/absolute/JevTrace/.env` after `node`.
 
 Check the connection with `claude mcp list` or `/mcp` inside Claude Code, then ask for context, for example "Use jevtrace to find the code that decides retry delays". Pass `--root /absolute/project` after `cli.js` to pin one repository instead.
 

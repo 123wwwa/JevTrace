@@ -1,5 +1,6 @@
 // Tests must never write to the real usage log in the home directory.
 process.env.JEVTRACE_USAGE_LOG = 'off';
+process.env.JEVTRACE_CONFIG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -498,4 +499,20 @@ test('files under no config are searched without one; files a config owns but ex
   assert.deepEqual(files, ['e2e/specs/login.ts', 'frontend/src/deal.js', 'frontend/src/page.js']);
   const adapter = new TypeScriptAdapter(root);
   assert.deepEqual(adapter.reverseDependencies(adapter.findEntry({ file: 'frontend/src/deal.js', symbol: 'updateProbability' })).edges.map(edge => edge.target.name), ['onStatusChange']);
+});
+
+test('a clearly more relevant lead that overlaps an earlier one beats a diverse but weak lead', async t => {
+  const root = project(t, {
+    'src/request.ts': 'export class Req {\n  cache: Record<string, string> = {};\n  #cached(key: string) { return this.cache[key] ?? (this.cache[key] = key); }\n  text() { return this.#cached("text"); }\n}\n',
+    'src/adapter.ts': 'export function createRequest(body: string) { return body.trim(); }\n',
+  });
+  const scores = { 'Req.#cached': 0.93, 'Req.text': 0.91, createRequest: 0.7 };
+  const scored = judge(node => node.id.startsWith('file::') || node.id.startsWith('dir::') ? 0.9 : scores[node.name] ?? 0.1);
+  const result = await discoverEntries(new RepositoryIndex(root), scored, 'reuse the cached body', { maxLeads: 2 }, new TypeScriptAdapter(root));
+  assert.deepEqual(result.semanticLeads.map(lead => lead.name), ['Req.#cached', 'Req.text']);
+
+  const adapter = new TypeScriptAdapter(root);
+  const cached = adapter.findEntry({ file: 'src/request.ts', symbol: 'Req.#cached' });
+  assert.deepEqual(adapter.dependencies(cached, { values: true }).edges.map(edge => `${edge.kind}:${edge.target.name}`), ['value:Req.cache'], 'the instance state a method works on');
+  assert.deepEqual(adapter.dependencies(cached).edges, [], 'fields are followed only with values');
 });

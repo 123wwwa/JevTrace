@@ -1,0 +1,90 @@
+{
+  "repository": "hono",
+  "task": "Allow a configurable clock-skew tolerance when checking whether a signed bearer token is expired or not yet valid",
+  "scannedFiles": 446,
+  "declarations": 2078,
+  "leads": [
+    {
+      "name": "verify",
+      "file": "utils/jwt/jwt.ts",
+      "score": 0.95
+    },
+    {
+      "name": "jwt",
+      "file": "middleware/jwt/jwt.ts",
+      "score": 0.87
+    },
+    {
+      "name": "verifyWithJwks",
+      "file": "utils/jwt/jwt.ts",
+      "score": 0.8
+    }
+  ],
+  "passedOver": [
+    {
+      "name": "methodNotAllowed",
+      "file": "middleware/method-not-allowed/index.ts"
+    },
+    {
+      "name": "notFoundHandler",
+      "file": "src/hono-base.ts"
+    },
+    {
+      "name": "generateSignedCookie",
+      "file": "helper/cookie/index.ts"
+    },
+    {
+      "name": "setSignedCookie",
+      "file": "helper/cookie/index.ts"
+    },
+    {
+      "name": "parseSigned",
+      "file": "src/utils/cookie.ts"
+    }
+  ],
+  "focus": {
+    "name": "verify",
+    "file": "utils/jwt/jwt.ts",
+    "line": 96
+  },
+  "edges": [
+    {
+      "label": "caller",
+      "name": "verifyWithJwks",
+      "file": "utils/jwt/jwt.ts"
+    },
+    {
+      "label": "calls",
+      "name": "decode",
+      "file": "utils/jwt/jwt.ts"
+    },
+    {
+      "label": "type",
+      "name": "JWTPayload",
+      "file": "utils/jwt/types.ts"
+    },
+    {
+      "label": "throws",
+      "name": "JwtTokenNotBefore",
+      "file": "utils/jwt/types.ts"
+    },
+    {
+      "label": "throws",
+      "name": "JwtTokenIssuedAt",
+      "file": "utils/jwt/types.ts"
+    },
+    {
+      "label": "test",
+      "name": "describe('Credentials in cookie')",
+      "file": "middleware/jwt/index.test.ts"
+    }
+  ],
+  "returned": {
+    "symbols": 46,
+    "tokens": 7996,
+    "budget": 8000,
+    "bodies": 46,
+    "signatures": 0
+  },
+  "capturedAt": "2026-09-30"
+}

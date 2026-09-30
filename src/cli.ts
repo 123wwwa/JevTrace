@@ -9,6 +9,36 @@ import type { JevProvider } from './judges.js';
 import { query } from './query.js';
 import { RepositoryIndex, defaultMaxFiles, discoverEntries } from './discovery.js';
 import { formatStats } from './stats.js';
+import { configuredProvider, runSetup } from './setup.js';
+
+if (process.argv[2] === 'setup') {
+  try {
+    await runSetup();
+    process.exit(0);
+  } catch (error) {
+    process.stderr.write(`\n${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+}
+
+// Someone ran the server by hand in a terminal (MCP hosts connect through pipes): set it up or explain.
+if (process.argv.length === 2 && process.stdin.isTTY) {
+  if (!configuredProvider()) {
+    process.stdout.write('No decision provider is configured yet; starting setup.\n\n');
+    try { await runSetup(); } catch (error) {
+      process.stderr.write(`\n${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(1);
+    }
+  } else {
+    process.stdout.write([
+      'jevtrace is an MCP server over stdio; register it with your agent instead of running it here, e.g.',
+      `  claude mcp add jevtrace --scope user -- node "${path.resolve(process.argv[1])}"`,
+      'Commands: setup | query --task TEXT [--root DIR] | discover --task TEXT | stats [--days N]',
+      '',
+    ].join('\n'));
+  }
+  process.exit(0);
+}
 
 if (process.argv[2] === 'stats') {
   const daysArgument = process.argv.indexOf('--days');
@@ -52,6 +82,10 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
     process.exit(1);
   }
   try {
+    if (!process.argv.includes('--offline') && !argument('--provider') && !configuredProvider() && process.stdin.isTTY) {
+      process.stderr.write('No decision provider is configured yet; starting setup (or rerun with --offline).\n\n');
+      await runSetup({ output: process.stderr });
+    }
     const judge = process.argv.includes('--offline')
       ? new IncludeAllJudge()
       : createJudge(process.env, {
@@ -91,5 +125,7 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
     process.exitCode = 1;
   }
 } else {
+  // MCP hosts show stderr in their logs; tool calls report the same with the fix.
+  if (!configuredProvider()) process.stderr.write('jevtrace: no decision provider is configured; run `node dist/cli.js setup` in a terminal\n');
   serveStdio(() => createServer(root));
 }

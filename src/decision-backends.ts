@@ -168,6 +168,8 @@ export class JevBackend implements DecisionBackend {
 // ---- provider registry -----------------------------------------------------------------------------------
 
 export interface ProviderSpec {
+  /** Name shown by `jevtrace setup`. */
+  label: string;
   /** Environment variable holding the API key (optional for providers that allow keyless endpoints). */
   keyEnv?: string;
   endpoint: string;
@@ -182,8 +184,8 @@ const jev = (config: { endpoint: string; apiKey: string }) => new JevBackend(con
  * vendor's decisions API): implement DecisionBackend for its wire format and add an entry here.
  */
 export const providers = {
-  openrouter: { keyEnv: 'OPENROUTER_API_KEY', endpoint: 'https://openrouter.ai/api/alpha/decisions', model: 'typesafe/jev-1.13', createBackend: jev },
-  typesafe: { keyEnv: 'TYPESAFE_API_KEY', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', createBackend: jev },
-  vercel: { keyEnv: 'AI_GATEWAY_API_KEY', endpoint: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone', model: 'typesafe-ai/jev', createBackend: jev },
-  opencode: { keyEnv: 'OPENCODE_API_KEY', endpoint: 'https://opencode.ai/zen/v1/systemone', model: 'jev-1.13', createBackend: jev },
+  openrouter: { label: 'OpenRouter', keyEnv: 'OPENROUTER_API_KEY', endpoint: 'https://openrouter.ai/api/alpha/decisions', model: 'typesafe/jev-1.13', createBackend: jev },
+  typesafe: { label: 'TypeSafe', keyEnv: 'TYPESAFE_API_KEY', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', createBackend: jev },
+  vercel: { label: 'Vercel AI Gateway', keyEnv: 'AI_GATEWAY_API_KEY', endpoint: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone', model: 'typesafe-ai/jev', createBackend: jev },
+  opencode: { label: 'OpenCode Zen', keyEnv: 'OPENCODE_API_KEY', endpoint: 'https://opencode.ai/zen/v1/systemone', model: 'jev-1.13', createBackend: jev },
 } satisfies Record<string, ProviderSpec>;

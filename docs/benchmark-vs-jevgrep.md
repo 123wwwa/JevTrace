@@ -1,5 +1,7 @@
 # Benchmark: JevTrace vs jevgrep
 
+This page measures retrieval: the text each tool hands an agent. What a whole agent session costs with each tool (and with ttsc) is in the [agent benchmark](agent-benchmark.md).
+
 A head-to-head **retrieval** benchmark on JavaScript/TypeScript tasks: both tools get the same natural-language task and the same repository checkout, and both are scored on the text a coding agent would actually receive.
 
 | Metric (mean over 19 tasks) | JevTrace | jevgrep 0.7.0 |

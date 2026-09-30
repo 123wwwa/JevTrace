@@ -1,3 +1,5 @@
+// Tests must never read or write the real user config.
+process.env.JEVTRACE_CONFIG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
@@ -127,9 +129,15 @@ test('Jev payload includes entry body and relationship metadata', async () => {
   }
 });
 
-test('Jev through OpenRouter is the default and maps noul probabilities', async () => {
-  assert.equal(createJudge({ OPENROUTER_API_KEY: 'test-key' }).name, 'openrouter-jev');
-  assert.throws(() => createJudge({}), /OPENROUTER_API_KEY/);
+test('no provider is a default: one provider key in the environment selects it; none or several ask for setup', async () => {
+  assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'test-key' }).name, 'openrouter-jev');
+  assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENCODE_API_KEY: 'test-key' }).name, 'opencode-jev');
+  assert.throws(() => createJudge({ JEVTRACE_CONFIG: 'off' }), /No decision provider is configured\. Run `jevtrace setup`/);
+  assert.throws(() => createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'a', TYPESAFE_API_KEY: 'b' }), /Several provider keys are set \(OPENROUTER_API_KEY, TYPESAFE_API_KEY\)/);
+  assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'a', TYPESAFE_API_KEY: 'b', JEVTRACE_PROVIDER: 'typesafe' }).name, 'typesafe-jev');
+});
+
+test('OpenRouter maps noul probabilities', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     const request = JSON.parse(options.body);
@@ -160,10 +168,10 @@ test('selects TypeSafe, Vercel, and custom System One providers with model overr
     const entry = new TypeScriptAdapter(root).findEntry({ file: 'src/auth.ts', line: 4 });
     const candidate = { node: entry, kind: 'call', from: entry.id, depth: 1, site: { file: 'src/auth.ts', line: 4 } };
 
-    await createJudge({ TYPESAFE_API_KEY: 'ts-key', JEVTRACE_PROVIDER: 'typesafe' }).judge('Fix token validation', entry, [candidate]);
-    await createJudge({ AI_GATEWAY_API_KEY: 'vercel-key', JEVTRACE_PROVIDER: 'vercel', JEVTRACE_MODEL: 'typesafe-ai/jev-custom' }).judge('Fix token validation', entry, [candidate]);
-    await createJudge({ OPENCODE_API_KEY: 'zen-key', JEVTRACE_PROVIDER: 'opencode', JEVTRACE_MODEL: 'jev-1.13-free' }).judge('Fix token validation', entry, [candidate]);
-    await createJudge({ JEVTRACE_PROVIDER: 'custom', JEVTRACE_ENDPOINT: 'http://localhost:8787/v1/systemone', JEVTRACE_MODEL: 'local-jev' }).judge('Fix token validation', entry, [candidate]);
+    await createJudge({ JEVTRACE_CONFIG: 'off', TYPESAFE_API_KEY: 'ts-key', JEVTRACE_PROVIDER: 'typesafe' }).judge('Fix token validation', entry, [candidate]);
+    await createJudge({ JEVTRACE_CONFIG: 'off', AI_GATEWAY_API_KEY: 'vercel-key', JEVTRACE_PROVIDER: 'vercel', JEVTRACE_MODEL: 'typesafe-ai/jev-custom' }).judge('Fix token validation', entry, [candidate]);
+    await createJudge({ JEVTRACE_CONFIG: 'off', OPENCODE_API_KEY: 'zen-key', JEVTRACE_PROVIDER: 'opencode', JEVTRACE_MODEL: 'jev-1.13-free' }).judge('Fix token validation', entry, [candidate]);
+    await createJudge({ JEVTRACE_CONFIG: 'off', JEVTRACE_PROVIDER: 'custom', JEVTRACE_ENDPOINT: 'http://localhost:8787/v1/systemone', JEVTRACE_MODEL: 'local-jev' }).judge('Fix token validation', entry, [candidate]);
 
     assert.deepEqual(seen, [
       { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', authorization: 'Bearer ts-key' },
@@ -524,4 +532,79 @@ test('resolves tsconfig path aliases and typed property method calls', () => {
   const edge = adapter.dependencies(method).edges.find(candidate => candidate.target.name === 'UserRepo.find');
   assert.equal(edge?.kind, 'method');
   assert.equal(edge?.target.file, 'src/method.ts');
+});
+
+test('jevtrace setup saves the chosen provider, key and model; the environment still overrides it', async t => {
+  const { runSetup } = await import('../dist/setup.js');
+  const { Readable, Writable } = await import('node:stream');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-setup-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, 'config.json');
+  const env = { JEVTRACE_CONFIG: configFile };
+  let printed = '';
+  const output = new Writable({ write(chunk, _encoding, done) { printed += chunk; done(); } });
+  const checked = [];
+  // Providers are listed alphabetically: 1 OpenCode Zen, 2 OpenRouter, 3 TypeSafe, 4 Vercel AI Gateway, 5 custom.
+  const answers = lines => Readable.from([lines.join('\n') + '\n']);
+  const saved = await runSetup({ env, output, input: answers(['3', 'first-key', '', 'n', '']),
+    verify: async config => { checked.push(config.apiKey); return checked.length === 1 ? 'HTTP 401: invalid key' : undefined; } });
+  assert.deepEqual(checked, ['first-key']);
+  assert.deepEqual(saved, { provider: 'typesafe', apiKey: 'first-key' });
+  assert.match(printed, /1\. OpenCode Zen[\s\S]*2\. OpenRouter[\s\S]*3\. TypeSafe[\s\S]*5\. Custom endpoint/);
+  assert.match(printed, /failed\n {2}HTTP 401: invalid key/);
+  assert.ok(!printed.includes('first-key'), 'the key is never printed');
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { provider: 'typesafe', apiKey: 'first-key' });
+  if (process.platform !== 'win32') assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+
+  // Enter keeps the saved provider and key; a new model is stored.
+  await runSetup({ env, output, input: answers(['', '', 'jev-next']), verify: async () => undefined });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { provider: 'typesafe', apiKey: 'first-key', model: 'jev-next' });
+
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    seen.push({ url: String(url), model: JSON.parse(options.body).model, authorization: options.headers.Authorization });
+    return new Response(JSON.stringify({ answers: { specific: { noul: 0.9 } } }), { status: 200 });
+  };
+  try {
+    await createJudge(env).judgeTaskScope('Fix the login redirect');
+    await createJudge({ ...env, TYPESAFE_API_KEY: 'env-key' }).judgeTaskScope('Fix the logout redirect');
+    // The saved key belongs to TypeSafe only; another provider needs its own.
+    assert.throws(() => createJudge({ ...env, JEVTRACE_PROVIDER: 'vercel' }), /No API key for Vercel AI Gateway: run `jevtrace setup` or set AI_GATEWAY_API_KEY/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(seen, [
+    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-next', authorization: 'Bearer first-key' },
+    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-next', authorization: 'Bearer env-key' },
+  ]);
+});
+
+test('in a terminal the API key is read in raw mode: one * per character, backspace works, the key is never echoed', async t => {
+  const { runSetup } = await import('../dist/setup.js');
+  const { PassThrough, Writable } = await import('node:stream');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-setup-tty-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const input = new PassThrough();
+  input.isTTY = true;
+  const rawModes = [];
+  input.setRawMode = mode => { rawModes.push(mode); return input; };
+  let printed = '';
+  // Answer each prompt as it appears, the way a person types.
+  const replies = [[/Provider \[1-5\]: $/, '2\n'], [/\(hidden\): $/, 'sk-ab\u007fc\r'], [/Model \[typesafe\/jev-1\.13\]: $/, '\n']];
+  const output = new Writable({ write(chunk, _encoding, done) {
+    printed += chunk;
+    const next = replies[0];
+    if (next && next[0].test(printed)) { replies.shift(); setImmediate(() => input.write(next[1])); }
+    done();
+  } });
+  const saved = await runSetup({ env: { JEVTRACE_CONFIG: path.join(dir, 'config.json') }, input, output, verify: async () => undefined });
+  assert.deepEqual(saved, { provider: 'openrouter', apiKey: 'sk-ac' });
+  assert.deepEqual(rawModes, [true, false]);
+  assert.match(printed, /\(hidden\): \*\*\*\*\*\u0008 \u0008\*\n/);
+  assert.ok(!printed.includes('sk-a'));
 });

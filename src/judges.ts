@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Candidate, CodeNode, FileDiscoveryContext, JudgeCallResult, Judgment, ProviderBatchStats, RelevanceJudge, TaskScopeJudgment } from './types.js';
+import { readUserConfig } from './user-config.js';
 import { JevBackend, providers, type DecisionBackend, type DecisionRequest, type DecisionResult, type DecisionUsage, type ProviderSpec } from './decision-backends.js';
 
 // Useful for local/offline operation and for measuring the graph's unfiltered recall.
@@ -330,28 +331,41 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
     throw new Error(`Unknown relevance judge: ${legacy}`);
   }
 
+  // No provider is preferred: an explicit choice (flag, JEVTRACE_PROVIDER, `jevtrace setup`) wins, and
+  // otherwise the environment must name exactly one provider through its key.
+  const config = readUserConfig(env);
+  const keyed = (Object.keys(providers) as Array<keyof typeof providers>).filter(name => env[providers[name].keyEnv]);
   const provider = overrides.provider
     ?? (env.JEVTRACE_PROVIDER as JevProvider | undefined)
     ?? (legacy === 'jev' ? 'typesafe' : legacy === 'openrouter-jev' ? 'openrouter' : undefined)
-    ?? 'openrouter';
+    ?? (config?.provider as JevProvider | undefined)
+    ?? (keyed.length === 1 ? keyed[0] : undefined);
+  if (!provider) {
+    throw new Error(keyed.length > 1
+      ? `Several provider keys are set (${keyed.map(name => providers[name].keyEnv).join(', ')}); choose one with JEVTRACE_PROVIDER or \`jevtrace setup\``
+      : 'No decision provider is configured. Run `jevtrace setup` (node dist/cli.js setup) to choose one and enter its API key, set JEVTRACE_PROVIDER and its key in the environment, or use --offline');
+  }
+  // The saved key and model belong to the saved provider only.
+  const saved = config?.provider === provider ? config : undefined;
   const batchSize = Number(env.JEVTRACE_JEV_BATCH_SIZE ?? 16);
   if (provider === 'custom') {
-    const endpoint = overrides.endpoint ?? env.JEVTRACE_ENDPOINT;
+    const endpoint = overrides.endpoint ?? env.JEVTRACE_ENDPOINT ?? saved?.endpoint;
     if (!endpoint) throw new Error('JEVTRACE_ENDPOINT is required for JEVTRACE_PROVIDER=custom');
-    const model = overrides.model ?? env.JEVTRACE_MODEL ?? 'jev-latest';
-    return new JevJudge(env.JEVTRACE_API_KEY ?? '', endpoint, model, 0.5, batchSize, 'custom-jev');
+    const model = overrides.model ?? env.JEVTRACE_MODEL ?? saved?.model ?? 'jev-latest';
+    return new JevJudge(env.JEVTRACE_API_KEY ?? saved?.apiKey ?? '', endpoint, model, 0.5, batchSize, 'custom-jev');
   }
   if (!Object.hasOwn(providers, provider)) {
     throw new Error(`Unknown decision provider: ${provider} (available: ${[...Object.keys(providers), 'custom'].join(', ')})`);
   }
 
   const spec: ProviderSpec = providers[provider];
-  const apiKey = spec.keyEnv ? env[spec.keyEnv] : '';
-  if (spec.keyEnv && !apiKey) throw new Error(`${spec.keyEnv} is required for JEVTRACE_PROVIDER=${provider}`);
+  const apiKey = (spec.keyEnv ? env[spec.keyEnv] : undefined) ?? saved?.apiKey;
+  if (spec.keyEnv && !apiKey) throw new Error(`No API key for ${spec.label}: run \`jevtrace setup\` or set ${spec.keyEnv}`);
   const model = overrides.model ?? env.JEVTRACE_MODEL
     ?? (provider === 'openrouter' ? env.JEVTRACE_OPENROUTER_JEV_MODEL : undefined)
     ?? (provider === 'typesafe' ? env.JEVTRACE_JEV_MODEL : undefined)
+    ?? saved?.model
     ?? spec.model;
-  const endpoint = overrides.endpoint ?? env.JEVTRACE_ENDPOINT ?? spec.endpoint;
+  const endpoint = overrides.endpoint ?? env.JEVTRACE_ENDPOINT ?? saved?.endpoint ?? spec.endpoint;
   return new DecisionJudge(spec.createBackend({ endpoint, apiKey: apiKey ?? '' }), model, 0.5, batchSize, `${provider}-jev`);
 }
