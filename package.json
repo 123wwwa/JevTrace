@@ -1,14 +1,19 @@
 {
   "name": "jevtrace",
   "version": "0.1.0",
-  "description": "Dependency-aware JS/TS context retrieval for coding agents",
+  "description": "MCP server that hands coding agents the JS/TS code a task needs: Jev picks the relevant declarations, the TypeScript compiler follows their callers, callees, types and tests",
   "keywords": [
     "mcp",
     "typescript",
     "javascript",
     "code-context",
     "coding-agent",
-    "retrieval"
+    "retrieval",
+    "mcp-server",
+    "claude-code",
+    "codex",
+    "cursor",
+    "model-context-protocol"
   ],
   "repository": {
     "type": "git",

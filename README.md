@@ -21,28 +21,21 @@ Give it a coding task; it returns the JS/TS code that task needs, within a token
 ## Quick start
 
 ```bash
-git clone https://github.com/123wwwa/JevTrace && cd JevTrace
-npm install && npm run build
-node dist/cli.js setup    # choose the provider and enter its API key (or set it in .env)
-node dist/cli.js query --root /path/to/your/project --task "Fix refresh token validation"
+npx -y jevtrace setup                                    # choose a provider and enter its API key, once
+claude mcp add jevtrace --scope user -- npx -y jevtrace  # Claude Code: searches whichever project you open
 ```
 
-In Claude Code (searches whichever project you open; uses the provider saved by `setup`):
+Codex and Cursor take one config block each: see [Claude Code, Codex and Cursor](docs/clients.md). To try it without an agent:
 
 ```bash
-claude mcp add jevtrace --scope user -- node /path/to/JevTrace/dist/cli.js
-```
-
-JevTrace's server instructions ask agents to call it before searching (in the agent benchmark, Claude Code did in 5 of 5 tasks). If yours still greps first, add this line to `CLAUDE.md`:
-
-```
-To find the code a task needs, call mcp__jevtrace__retrieve_dependency_context with the task before using Grep, Glob or Read, then read only what its result did not cover.
+npx -y jevtrace query --root /path/to/your/project --task "Fix refresh token validation"
 ```
 
 Ask about one behaviour or area of an existing TS/JS codebase ("where is X decided, what else touches it"). Project-wide requests such as "find bugs" or "review everything" get per-area subtasks to call it with instead of code. Supports `.ts/.tsx/.js/.jsx/.mjs/.cjs` and Vue components, ES modules and CommonJS, with or without a tsconfig/jsconfig, up to 20,000 source files; not Svelte/Astro — see [supported projects](docs/usage.md#supported-projects).
 
 ## Docs
 
+- [Claude Code, Codex and Cursor](docs/clients.md): setup for each client, and what to do when it does not work
 - [Usage](docs/usage.md): CLI options, providers, MCP tools and parameters, benchmarks
 - [Architecture](docs/architecture.md): how discovery, compiler expansion and ranking work, and their limits
 - [Agent benchmark vs jevgrep and ttsc](docs/agent-benchmark.md), [retrieval benchmark vs jevgrep](docs/benchmark-vs-jevgrep.md), [evaluation](docs/evaluation.md) and [real-task evaluation](docs/discovery-evaluation.md)
