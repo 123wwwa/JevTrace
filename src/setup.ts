@@ -1,4 +1,3 @@
-import path from 'node:path';
 import readline from 'node:readline';
 import { performance } from 'node:perf_hooks';
 import { JevBackend, providers, type ProviderSpec } from './decision-backends.js';
@@ -10,6 +9,9 @@ import { readUserConfig, userConfigPath, writeUserConfig, type UserConfig } from
  * check the key with one small request, and save it to the user config. Also reads answers line by line from
  * a pipe, for scripts.
  */
+
+/** Setup for each MCP client (docs/clients.md). */
+export const clientsGuide = 'https://github.com/123wwwa/JevTrace/blob/main/docs/clients.md';
 
 type Input = NodeJS.ReadStream;
 type Output = NodeJS.WritableStream;
@@ -158,13 +160,14 @@ export async function runSetup(options: SetupOptions = {}): Promise<UserConfig> 
     if (!failure) {
       output.write(`ok (${((performance.now() - started) / 1000).toFixed(1)} s)\n`);
       const file = writeUserConfig(config, env);
-      const cli = path.resolve(process.argv[1] ?? 'dist/cli.js');
+      // The npx form, not this script's path: under npx that path is a cache directory that can disappear.
       output.write([
         `Saved to ${file}. Environment variables (${choice.spec?.keyEnv ?? 'JEVTRACE_API_KEY'}, JEVTRACE_PROVIDER) still override it.`,
         '',
         'Next:',
-        `  claude mcp add jevtrace --scope user -- node "${cli}"`,
-        `  node "${cli}" query --root /path/to/project --task "Describe the change"`,
+        '  Claude Code:     claude mcp add jevtrace --scope user -- npx -y jevtrace',
+        `  Codex, Cursor:   ${clientsGuide}`,
+        '  Try it:          npx -y jevtrace query --root /path/to/project --task "Describe the change"',
         '',
       ].join('\n'));
       return config;

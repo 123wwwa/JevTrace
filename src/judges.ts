@@ -342,8 +342,8 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
     ?? (keyed.length === 1 ? keyed[0] : undefined);
   if (!provider) {
     throw new Error(keyed.length > 1
-      ? `Several provider keys are set (${keyed.map(name => providers[name].keyEnv).join(', ')}); choose one with JEVTRACE_PROVIDER or \`jevtrace setup\``
-      : 'No decision provider is configured. Run `jevtrace setup` (node dist/cli.js setup) to choose one and enter its API key, set JEVTRACE_PROVIDER and its key in the environment, or use --offline');
+      ? `Several provider keys are set (${keyed.map(name => providers[name].keyEnv).join(', ')}); choose one with JEVTRACE_PROVIDER or \`npx -y jevtrace setup\``
+      : 'No decision provider is configured. Run `npx -y jevtrace setup` in a terminal to choose one and enter its API key, set JEVTRACE_PROVIDER and its key in the environment, or use --offline');
   }
   // The saved key and model belong to the saved provider only.
   const saved = config?.provider === provider ? config : undefined;
@@ -360,7 +360,7 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
 
   const spec: ProviderSpec = providers[provider];
   const apiKey = (spec.keyEnv ? env[spec.keyEnv] : undefined) ?? saved?.apiKey;
-  if (spec.keyEnv && !apiKey) throw new Error(`No API key for ${spec.label}: run \`jevtrace setup\` or set ${spec.keyEnv}`);
+  if (spec.keyEnv && !apiKey) throw new Error(`No API key for ${spec.label}: run \`npx -y jevtrace setup\` or set ${spec.keyEnv}`);
   const model = overrides.model ?? env.JEVTRACE_MODEL
     ?? (provider === 'openrouter' ? env.JEVTRACE_OPENROUTER_JEV_MODEL : undefined)
     ?? (provider === 'typesafe' ? env.JEVTRACE_JEV_MODEL : undefined)

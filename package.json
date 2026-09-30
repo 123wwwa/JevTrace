@@ -1,6 +1,6 @@
 {
   "name": "jevtrace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server that hands coding agents the JS/TS code a task needs: Jev picks the relevant declarations, the TypeScript compiler follows their callers, callees, types and tests",
   "keywords": [
     "mcp",

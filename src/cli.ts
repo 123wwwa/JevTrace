@@ -9,7 +9,7 @@ import type { JevProvider } from './judges.js';
 import { query } from './query.js';
 import { RepositoryIndex, defaultMaxFiles, discoverEntries } from './discovery.js';
 import { formatStats } from './stats.js';
-import { configuredProvider, runSetup } from './setup.js';
+import { clientsGuide, configuredProvider, runSetup } from './setup.js';
 
 if (process.argv[2] === 'setup') {
   try {
@@ -32,7 +32,8 @@ if (process.argv.length === 2 && process.stdin.isTTY) {
   } else {
     process.stdout.write([
       'jevtrace is an MCP server over stdio; register it with your agent instead of running it here, e.g.',
-      `  claude mcp add jevtrace --scope user -- node "${path.resolve(process.argv[1])}"`,
+      '  claude mcp add jevtrace --scope user -- npx -y jevtrace',
+      `Codex and Cursor: ${clientsGuide}`,
       'Commands: setup | query --task TEXT [--root DIR] | discover --task TEXT | stats [--days N]',
       '',
     ].join('\n'));
@@ -126,6 +127,6 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
   }
 } else {
   // MCP hosts show stderr in their logs; tool calls report the same with the fix.
-  if (!configuredProvider()) process.stderr.write('jevtrace: no decision provider is configured; run `node dist/cli.js setup` in a terminal\n');
+  if (!configuredProvider()) process.stderr.write('jevtrace: no decision provider is configured; run `npx -y jevtrace setup` in a terminal\n');
   serveStdio(() => createServer(root));
 }

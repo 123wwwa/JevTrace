@@ -29,10 +29,10 @@ export function readUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   try {
     parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
-    throw new Error(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}; run \`jevtrace setup\` again`);
+    throw new Error(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}; run \`npx -y jevtrace setup\` again`);
   }
   const config = parsed as Partial<UserConfig>;
-  if (!config || typeof config.provider !== 'string') throw new Error(`${file} has no provider; run \`jevtrace setup\` again`);
+  if (!config || typeof config.provider !== 'string') throw new Error(`${file} has no provider; run \`npx -y jevtrace setup\` again`);
   return {
     provider: config.provider,
     ...(typeof config.apiKey === 'string' ? { apiKey: config.apiKey } : {}),

@@ -132,7 +132,7 @@ test('Jev payload includes entry body and relationship metadata', async () => {
 test('no provider is a default: one provider key in the environment selects it; none or several ask for setup', async () => {
   assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'test-key' }).name, 'openrouter-jev');
   assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENCODE_API_KEY: 'test-key' }).name, 'opencode-jev');
-  assert.throws(() => createJudge({ JEVTRACE_CONFIG: 'off' }), /No decision provider is configured\. Run `jevtrace setup`/);
+  assert.throws(() => createJudge({ JEVTRACE_CONFIG: 'off' }), /No decision provider is configured\. Run `npx -y jevtrace setup`/);
   assert.throws(() => createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'a', TYPESAFE_API_KEY: 'b' }), /Several provider keys are set \(OPENROUTER_API_KEY, TYPESAFE_API_KEY\)/);
   assert.equal(createJudge({ JEVTRACE_CONFIG: 'off', OPENROUTER_API_KEY: 'a', TYPESAFE_API_KEY: 'b', JEVTRACE_PROVIDER: 'typesafe' }).name, 'typesafe-jev');
 });
@@ -572,7 +572,7 @@ test('jevtrace setup saves the chosen provider, key and model; the environment s
     await createJudge(env).judgeTaskScope('Fix the login redirect');
     await createJudge({ ...env, TYPESAFE_API_KEY: 'env-key' }).judgeTaskScope('Fix the logout redirect');
     // The saved key belongs to TypeSafe only; another provider needs its own.
-    assert.throws(() => createJudge({ ...env, JEVTRACE_PROVIDER: 'vercel' }), /No API key for Vercel AI Gateway: run `jevtrace setup` or set AI_GATEWAY_API_KEY/);
+    assert.throws(() => createJudge({ ...env, JEVTRACE_PROVIDER: 'vercel' }), /No API key for Vercel AI Gateway: run `npx -y jevtrace setup` or set AI_GATEWAY_API_KEY/);
   } finally {
     globalThis.fetch = originalFetch;
   }
