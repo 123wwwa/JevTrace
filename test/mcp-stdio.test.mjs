@@ -1,4 +1,6 @@
 // End-to-end MCP check over real stdio: the server runs as a child process exactly as an MCP host starts it.
+// Tests must never write to the real usage log in the home directory.
+process.env.JEVTRACE_USAGE_LOG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -31,7 +33,7 @@ async function connect(t, root, env = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [cli, '--root', root],
-    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', ...env },
+    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', ...env },
     stderr: 'pipe',
   });
   let stderr = '';
@@ -201,4 +203,73 @@ test('session savings accumulate across task-only retrievals and survive a no-co
   assert.equal(none.structuredContent.status, 'incomplete');
   assert.equal(none.structuredContent.items, undefined);
   assert.equal(none.structuredContent.session.retrievals, 2);
+});
+
+test('without --root the server follows CLAUDE_PROJECT_DIR, as Claude Code user-scope servers need', async t => {
+  const root = project(t, authProject);
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [cli],
+    cwd: os.tmpdir(),
+    env: { ...getDefaultEnvironment(), JEVTRACE_JUDGE: 'include-all', JEVTRACE_USAGE_LOG: 'off', CLAUDE_PROJECT_DIR: root },
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'stdio-test', version: '1.0.0' });
+  t.after(() => client.close());
+  await client.connect(transport);
+  const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
+  assert.ok(!result.isError, text(result));
+  assert.ok(result.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+});
+
+test('tool calls are logged locally and `jevtrace stats` summarizes them with Claude Code session use', async t => {
+  const root = project(t, authProject);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-usage-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const logFile = path.join(scratch, 'usage.jsonl');
+  const { client } = await connect(t, root, { JEVTRACE_USAGE_LOG: logFile });
+  await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token', tokenBudget: 500 } });
+  await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'zzqx wobble frobnicate' } });
+  await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/missing.ts', line: 1 } });
+  const entries = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(entries.map(entry => [entry.tool, entry.outcome]), [
+    ['retrieve_dependency_context', entries[0].outcome],
+    ['retrieve_dependency_context', 'no-context'],
+    ['retrieve_from_entry', 'error'],
+  ]);
+  assert.equal(entries[0].ok, true);
+  assert.equal(entries[0].project, path.resolve(root));
+  assert.ok(entries[0].candidateTokens >= entries[0].returnedTokens);
+
+  // One session that used JevTrace and one that only searched.
+  const claudeDir = path.join(scratch, 'claude');
+  const sessionDir = path.join(claudeDir, 'projects', 'demo');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const toolUse = name => JSON.stringify({ type: 'assistant', cwd: '/work/demo', message: { content: [{ type: 'tool_use', name, input: {} }] } });
+  fs.writeFileSync(path.join(sessionDir, 'a.jsonl'), [toolUse('mcp__jevtrace__retrieve_dependency_context'), toolUse('Read')].join('\n'));
+  fs.writeFileSync(path.join(sessionDir, 'b.jsonl'), [toolUse('Grep'), toolUse('Read')].join('\n'));
+  const { execFileSync } = await import('node:child_process');
+  const output = execFileSync(process.execPath, [cli, 'stats', '--days', '1'], { encoding: 'utf8',
+    env: { ...process.env, JEVTRACE_USAGE_LOG: logFile, CLAUDE_CONFIG_DIR: claudeDir } });
+  assert.match(output, /Tool calls: 3 \(retrieve_dependency_context 2, retrieve_from_entry 1\)/);
+  assert.match(output, /failed: 1, no relevant code found: 1/);
+  assert.match(output, /used JevTrace: 1/);
+  assert.match(output, /searched with Grep\/Glob\/Read only: 1/);
+});
+
+test('structured results stay small: source code is only in the maxChars-bounded text', async t => {
+  const files = { ...authProject };
+  for (let index = 0; index < 40; index++) files[`src/helper${index}.ts`] = `export function refreshHelper${index}(token: string) {\n${'  const padding = token + "' + 'x'.repeat(80) + '";\n'.repeat(1)}${Array.from({ length: 30 }, (_, line) => `  const step${line} = token.length + ${line};`).join('\n')}\n  return token;\n}\n`;
+  const { client } = await connect(t, project(t, files));
+  const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token helper', maxChars: 5000 } });
+  assert.ok(!result.isError, text(result));
+  assert.ok(text(result).length <= 5000);
+  // Claude Code shows the model structuredContent rather than the text, so the bounded context is there too.
+  assert.equal(result.structuredContent.context, text(result));
+  assert.ok(JSON.stringify(result.structuredContent).length < 5_000 + 20_000, `structuredContent was ${JSON.stringify(result.structuredContent).length} chars`);
+  const outsideContext = JSON.stringify({ ...result.structuredContent, context: undefined });
+  assert.ok(!outsideContext.includes('const step'), 'source code appears only inside the bounded context');
+  const discovered = await client.callTool({ name: 'discover_entries', arguments: { task: 'refresh token helper' } });
+  assert.ok(text(discovered).length < 5_000);
+  assert.match(text(discovered), /call retrieve_dependency_context for the code/);
 });

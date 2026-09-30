@@ -1,3 +1,5 @@
+// Tests must never write to the real usage log in the home directory.
+process.env.JEVTRACE_USAGE_LOG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -202,7 +204,8 @@ test('final budget reduces large neighbours to signatures before omitting them',
   const normalize = result.items.find(item => item.node.name === 'normalizeToken');
   assert.equal(normalize?.level, 'signature');
   assert.ok(result.usedTokens <= 500);
-  assert.match(result.warnings.join('\n'), /reduced to signatures/);
+  assert.match(result.notes.join('\n'), /reduced to signatures/, 'budget reductions are normal operation, reported as notes');
+  assert.equal(result.status, 'complete', 'normal bounds do not mark a result incomplete');
 });
 
 test('compiler scans are cached per program and refreshed after edits; recent projects stay warm', t => {
@@ -212,8 +215,8 @@ test('compiler scans are cached per program and refreshed after edits; recent pr
   const lead = adapter.findEntry({ file: 'src/auth.ts', symbol: 'refreshToken' });
   let references = 0;
   const service = adapter['service'];
-  const original = service.findReferences.bind(service);
-  service.findReferences = (...args) => { references++; return original(...args); };
+  const original = service.provideCallHierarchyIncomingCalls.bind(service);
+  service.provideCallHierarchyIncomingCalls = (...args) => { references++; return original(...args); };
   adapter.reverseDependencies(lead);
   const afterFirst = references;
   adapter.reverseDependencies(lead);
@@ -252,4 +255,247 @@ test('session savings keep an exact cumulative curve when thinned', async () => 
   assert.ok(stats.points.length <= 4);
   assert.deepEqual(stats.points.at(-1), [9, 900, 540], 'the latest point is always kept');
   for (const [retrieval, candidate, returned] of stats.points) assert.deepEqual([candidate, returned], [retrieval * 100, retrieval * 60]);
+});
+
+test('a decision provider with a different wire format plugs in through DecisionBackend alone', async t => {
+  const { DecisionJudge } = await import('../dist/judges.js');
+  const { postJson } = await import('../dist/decision-backends.js');
+  const root = project(t, authFiles);
+  // A made-up vendor: one POST with a flat `items` list, answers as `{ results: [{ id, p }] }`.
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    seen.push(body);
+    const results = body.items.map(item => ({ id: item.id, p: /refresh|auth/i.test(JSON.stringify(item) + JSON.stringify(body.context)) ? 0.9 : 0.6 }));
+    return new Response(JSON.stringify({ results, billing: { input_tokens: 1200, usd: 0.0005 } }), { status: 200 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const backend = {
+    cacheKey: 'https://decisions.example.test/v1/evaluate',
+    serialize: request => JSON.stringify({
+      model: request.model,
+      context: request.state,
+      items: Object.entries(request.questions).map(([id, question]) => ({ id, prompt: question.instructions })),
+    }),
+    async decide(request, options) {
+      const { data, attempts } = await postJson(this.cacheKey, { 'X-Api-Key': 'test' }, this.serialize(request), { ...options, label: 'Example decisions request' });
+      return {
+        answers: Object.fromEntries(data.results.map(result => [result.id, result.p])),
+        usage: { inputTokens: data.billing.input_tokens, cost: data.billing.usd },
+        attempts,
+      };
+    },
+  };
+  const judge = new DecisionJudge(backend, 'example-model', 0.5, 16, 'example-decisions');
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), judge, judge, 'refresh token', { contextRanking: 'structural' });
+  assert.ok(result.items.some(item => item.node.name === 'refreshToken'));
+  assert.equal(result.discovery.mode, 'parallel-jev');
+  assert.ok(seen.length > 0 && seen.every(body => body.model === 'example-model' && Array.isArray(body.items)));
+  const batch = result.discovery.judgeStats.batches.find(entry => !entry.cacheHit);
+  assert.equal(batch.inputTokens, 1200);
+  assert.equal(batch.cost, 0.0005);
+});
+
+test('reverse expansion finds callers of variable-held functions, private methods and default exports', t => {
+  const root = project(t, {
+    'src/middleware.ts': 'export const timeout = (ms: number) => async (next: () => Promise<void>) => { await next(); return ms; };\n',
+    'src/app.ts': 'import { timeout } from "./middleware";\nexport function setup() { return timeout(10); }\n',
+    'src/client.ts': 'export class Client {\n  async #retry(): Promise<number> { return this.#retryFromError(); }\n  async #retryFromError(): Promise<number> { return 1; }\n  run() { return this.#retry(); }\n}\n',
+    'src/delay.ts': 'export default function delay(ms: number) { return ms; }\n',
+    'src/use-delay.ts': 'import wait from "./delay";\nexport function pause() { return wait(5); }\n',
+    'src/app.test.ts': 'import { timeout } from "./middleware";\ndeclare function it(name: string, body: () => void): void;\nit("applies the deadline", () => { timeout(1); });\n',
+  });
+  const adapter = new TypeScriptAdapter(root);
+  const callers = (file, symbol) => adapter.reverseDependencies(adapter.findEntry({ file, symbol })).edges.map(edge => `${edge.kind}:${edge.target.name}`).sort();
+  assert.deepEqual(callers('src/middleware.ts', 'timeout'), ['caller:setup', "test:it('applies the deadline') callback"]);
+  assert.deepEqual(callers('src/client.ts', 'Client.#retryFromError'), ['caller:Client.#retry']);
+  assert.deepEqual(callers('src/delay.ts', 'delay'), ['caller:pause']);
+  const pause = adapter.findEntry({ file: 'src/use-delay.ts', symbol: 'pause' });
+  assert.ok(adapter.dependencies(pause).edges.some(edge => edge.target.name === 'delay'), 'a default import is named after its declaration, not "default"');
+});
+
+test('callers reached through CommonJS module.exports and require are found, including renamed exports', t => {
+  const root = project(t, {
+    'src/retry.cjs': 'function retryDelay(n) { return n * 2; }\nmodule.exports = { retryDelay };\n',
+    'src/backoff.cjs': 'function backoffDelay(n) { return n; }\nexports.delay = backoffDelay;\n',
+    'src/run.cjs': 'const { retryDelay } = require("./retry.cjs");\nconst { delay } = require("./backoff.cjs");\nfunction go(n) { return retryDelay(n) + delay(n); }\nfunction unrelated(retryDelay) { return retryDelay; }\nmodule.exports = { go, unrelated };\n',
+  });
+  // A plain JavaScript project: no tsconfig, so every source is loaded with allowJs.
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  const adapter = new TypeScriptAdapter(root);
+  const callers = (file, symbol) => adapter.reverseDependencies(adapter.findEntry({ file, symbol })).edges.map(edge => edge.target.name).sort();
+  assert.deepEqual(callers('src/retry.cjs', 'retryDelay'), ['go'], 'a same-named parameter is not a use');
+  assert.deepEqual(callers('src/backoff.cjs', 'backoffDelay'), ['go']);
+});
+
+test('formatted context never cuts a code block; blocks over maxChars are listed by location', async t => {
+  const { formatContext } = await import('../dist/retrieve.js');
+  const body = name => `export function ${name}() {\n${'  const value = 1;\n'.repeat(40)}}`;
+  const item = (name, startLine) => ({ node: { id: name, name, file: 'src/a.ts', startLine, endLine: startLine + 41, source: body(name), signature: `export function ${name}()` }, level: 'body', path: [name], depth: 1 });
+  const result = { task: 't', judge: 'j', status: 'complete', entry: item('lead', 1).node, items: ['lead', 'helper', 'caller', 'type'].map((name, index) => item(name, 1 + index * 50)),
+    omitted: [], unresolved: [], considered: 4, usedTokens: 900, tokenBudget: 8000, visitPolicy: 'score', choiceDecisions: 0, wrapperLookahead: false,
+    bodyThreshold: 0, omitThreshold: 0, reverseFanIn: 12, reversePruned: 0, judgeRounds: 0, judgeTrace: [], warnings: [] };
+  const text = formatContext(result, 2500);
+  assert.ok(text.length <= 2500);
+  assert.ok(!text.includes('[Output character limit reached]'));
+  assert.equal((text.match(/```ts/g) ?? []).length * 2, (text.match(/```/g) ?? []).length, 'every block is closed');
+  assert.match(text, /## Not shown \(output limit/);
+  assert.match(text, /- type — src\/a\.ts:151-192/);
+});
+
+test('callers of a function held in a class property are found although the call hierarchy skips that form', t => {
+  const root = project(t, { 'src/request.ts': 'export class Req {\n  #cachedBody = (key: string) => key.length;\n  text() { return this.#cachedBody("text"); }\n  json() { return this.#cachedBody("json"); }\n}\n' });
+  const adapter = new TypeScriptAdapter(root);
+  const lead = adapter.findEntry({ file: 'src/request.ts', symbol: 'Req.#cachedBody' });
+  assert.deepEqual(adapter.reverseDependencies(lead).edges.map(edge => edge.target.name).sort(), ['Req.json', 'Req.text']);
+});
+
+test('siblings: helpers the lead\'s same-file caller uses alongside it are included one step further', async t => {
+  const root = project(t, {
+    'src/source.ts': [
+      'function sourceText(text: string) { return { lines: text.split("\\n") }; }',
+      'export function textUnits(parsed: { lines: string[] }, max: number) { return parsed.lines.slice(0, max); }',
+      'export function splitSource(text: string, max = 4) { return textUnits(sourceText(text), max); }',
+      'export function unrelated() { return 1; }',
+    ].join('\n'),
+  });
+  const onlyTextUnits = judge(node => node.id.startsWith('file::') || node.name === 'textUnits' ? 0.9 : 0.1);
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), onlyTextUnits, judge(), 'split text units', { contextRanking: 'structural' });
+  const byName = new Map(result.items.map(item => [item.node.name, item]));
+  assert.ok(byName.has('splitSource'), 'the caller is a direct neighbour');
+  assert.equal(byName.get('sourceText')?.kind, 'sibling');
+  assert.ok(!byName.has('unrelated'));
+});
+
+test('a project-wide task gets a repository map instead of arbitrary code; specific or unchecked tasks retrieve as before', async t => {
+  const root = project(t, {
+    'src/auth/token.ts': 'export function verifyToken(token: string) { return token.length > 0; }\nexport class TokenStore { get(key: string) { return key; } }\n',
+    'src/http/router.ts': 'export function route(path: string) { return path; }\n',
+    'src/http/router.test.ts': 'import { route } from "./router";\nexport function checkRoute() { return route("/"); }\n',
+  });
+  let discoverySignal;
+  const scoped = specificity => judge(() => 0.9, {
+    async judgeTaskScope() { return { specificity, stats: { batches: [{ candidates: 1, payloadBytes: 10, latencyMs: 1, cacheHit: false, attempts: 1, cost: 0.00001 }] } }; },
+    async judgeFiles(_task, nodes, _context, signal) {
+      discoverySignal = signal;
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return { decisions: new Map(nodes.map(node => [node.id, { include: true, score: 0.9 }])), stats: { batches: [] } };
+    },
+  });
+  const run = (specificity, options = {}) => retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), scoped(specificity), judge(), 'verify token', { contextRanking: 'structural', ...options });
+
+  const broad = await run(0.2);
+  assert.equal(broad.status, 'broad');
+  assert.equal(broad.specificity, 0.2);
+  assert.ok(!('items' in broad));
+  assert.match(broad.map, /src\/auth\/ — 1 file: verifyToken, TokenStore/);
+  assert.match(broad.map, /src\/http\/ — 1 file: route/);
+  assert.match(broad.map, /\+1 test files/);
+  assert.match(broad.guidance, /scopeCheck: false/);
+  // Two files are one area; the root descends into the only directory that holds them.
+  assert.deepEqual(broad.subtasks.map(subtask => subtask.task), ['verify token — only in src/ (verifyToken, TokenStore, route)']);
+  assert.ok(broad.guidance.includes('Suggested subtasks:\n- verify token — only in src/ (verifyToken'));
+  assert.equal(discoverySignal?.aborted, true, 'discovery is stopped once the task is known to be project-wide');
+
+  const specific = await run(0.8);
+  assert.ok('items' in specific && specific.items.some(item => item.node.name === 'verifyToken'));
+  assert.ok(specific.discovery.judgeStats.batches.some(batch => batch.cost === 0.00001), 'the scope question is billed with discovery');
+  const unchecked = await run(0.2, { scopeCheck: false });
+  assert.ok('items' in unchecked);
+
+  const failing = judge(() => 0.9, { async judgeTaskScope() { throw new Error('provider down'); } });
+  const degraded = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), failing, judge(), 'verify token', { contextRanking: 'structural' });
+  assert.ok('items' in degraded, 'a failed scope check falls back to retrieval');
+  assert.ok(degraded.notes.some(note => /Task scope check failed/.test(note)));
+});
+
+test('the repository map merges directories into their parents until it fits', async t => {
+  const root = project(t, Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`src/features/f${i}/impl.ts`, `export function feature${i}() { return ${i}; }\n`])));
+  const { repositoryMap, sourceInventory } = await import('../dist/broad-task.js');
+  const inventory = sourceInventory(new RepositoryIndex(root));
+  assert.equal(repositoryMap(inventory, 100_000).split('\n').length, 31);
+  const merged = repositoryMap(inventory, 400);
+  assert.ok(merged.length <= 400, merged);
+  assert.match(merged, /src\/(features\/)? — 30 files: feature0/);
+});
+
+test('suggested subtasks split the largest area first and stop before fragmenting smaller ones', async t => {
+  const files = {};
+  for (let i = 0; i < 12; i++) files[`src/core/c${i}.ts`] = `export function core${i}() { return ${i}; }\n`;
+  for (let i = 0; i < 10; i++) files[`src/plugins/p${i}/index.ts`] = `export function plugin${i}() { return ${i}; }\n`;
+  files['src/index.ts'] = 'export function main() { return 1; }\n';
+  const root = project(t, files);
+  const { sourceInventory, suggestSubtasks } = await import('../dist/broad-task.js');
+  const inventory = sourceInventory(new RepositoryIndex(root));
+  const areas = max => suggestSubtasks('fix bugs', inventory, max).map(subtask => `${subtask.area}:${subtask.files}`);
+  // src (23 files) is split into core, plugins and its own index; plugins' ten one-file packages would exceed 6.
+  assert.deepEqual(areas(6), ['src/ (files directly in it):1', 'src/core/:12', 'src/plugins/:10']);
+  assert.equal(areas(16).length, 12, 'with room, the largest remaining area (plugins) is split too');
+  assert.equal(suggestSubtasks('fix bugs', inventory, 6)[1].task, 'fix bugs — only in src/core/ (core0, core1, core10, core11)');
+});
+
+test('large repositories: the discovery limit counts indexed files, a missing base config is tolerated, and a big unconfigured repository is scoped around the entry', t => {
+  const root = project(t, {
+    'src/a.ts': 'export function alpha() { return beta(); }\nexport function beta() { return 1; }\n',
+    'src/b.ts': 'import { alpha } from "./a";\nexport function gamma() { return alpha(); }\n',
+    'scripts/outside.ts': 'export function outside() { return 1; }\n',
+  });
+  // A workspace base config that is not installed.
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ extends: '@org/tsconfig/base.json', include: ['src'] }));
+  const scan = maxFiles => new RepositoryIndex(root).scan(maxFiles);
+  const full = scan(100);
+  assert.deepEqual([...new Set(full.nodes.map(node => node.file))].sort(), ['src/a.ts', 'src/b.ts'], 'the project include list still applies');
+  assert.ok(full.warnings.some(warning => /1 project analysed without their base config, which was not found \(tsconfig\.json\)/.test(warning)));
+  assert.equal(full.scannedFiles, 2, 'files outside every project do not count toward the limit');
+  const limited = scan(1);
+  assert.ok(limited.warnings.some(warning => /Discovery file limit reached \(1 source files\): src\/b\.ts and later paths/.test(warning)));
+  const adapter = new TypeScriptAdapter(root);
+  assert.deepEqual(adapter.reverseDependencies(adapter.findEntry({ file: 'src/a.ts', symbol: 'alpha' })).edges.map(edge => edge.target.name), ['gamma']);
+
+  // No config and more than 5,000 sources: the program's roots are the entry's surroundings, not an error.
+  const big = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-unconfigured-'));
+  t.after(() => fs.rmSync(big, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(big, 'vendor'), { recursive: true });
+  for (let i = 0; i < 5001; i++) fs.writeFileSync(path.join(big, 'vendor', `v${i}.js`), `export function v${i}() { return ${i}; }\n`);
+  fs.mkdirSync(path.join(big, 'app'));
+  fs.writeFileSync(path.join(big, 'app', 'due.js'), 'export function formatDue(date) { return String(date); }\n');
+  fs.writeFileSync(path.join(big, 'app', 'notify.js'), 'import { formatDue } from "./due.js";\nexport function notify(card) { return formatDue(card.due); }\n');
+  const scoped = new TypeScriptAdapter(big);
+  const formatDue = scoped.findEntry({ file: 'app/due.js', symbol: 'formatDue' });
+  assert.deepEqual(scoped.reverseDependencies(formatDue).edges.map(edge => edge.target.name), ['notify']);
+});
+
+test('Vue single-file components: script blocks are indexed at their own lines and linked to the TypeScript code they use', t => {
+  const root = project(t, {
+    'src/composables/useCounter.ts': 'export function useCounter(start: number) {\n  let n = start;\n  const inc = () => ++n;\n  return { n, inc };\n}\n',
+    'src/components/Counter.vue': '<template>\n  <button @click="save">{{ n }}</button>\n</template>\n\n<script setup lang="ts">\nimport { useCounter } from "@/composables/useCounter";\nimport Child from "./Child.vue";\nconst { n, inc } = useCounter(1);\nfunction save() {\n  return inc();\n}\n</script>\n\n<style scoped>\n.a { color: red; }\n</style>\n',
+    'src/components/Child.vue': '<template><p>{{ label() }}</p></template>\n<script>\nimport { useCounter } from "../composables/useCounter";\nexport default {\n  methods: {\n    label() { return useCounter(2).n; },\n  },\n};\n</script>\n',
+  });
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', paths: { '@/*': ['./src/*'] } }, include: ['src/**/*'] }));
+  const nodes = new RepositoryIndex(root).scan(100).nodes.map(node => `${node.file}:${node.name}@${node.startLine}`).sort();
+  assert.deepEqual(nodes, ['src/components/Child.vue:label@6', 'src/components/Counter.vue:save@9', 'src/composables/useCounter.ts:useCounter@1']);
+  const adapter = new TypeScriptAdapter(root);
+  const callers = adapter.reverseDependencies(adapter.findEntry({ file: 'src/composables/useCounter.ts', symbol: 'useCounter' })).edges;
+  assert.deepEqual(callers.map(edge => `${edge.target.name}@${edge.site.file}:${edge.site.line}`).sort(), [
+    'Counter.vue <script setup>@src/components/Counter.vue:8',
+    'label@src/components/Child.vue:6',
+  ], 'top-level <script setup> calls belong to the component; a path alias resolves from inside a .vue file');
+  const save = adapter.findEntry({ file: 'src/components/Counter.vue', symbol: 'save' });
+  assert.equal(save.source, 'function save() {\n  return inc();\n}');
+});
+
+test('files under no config are searched without one; files a config owns but excludes are not', t => {
+  const root = project(t, {
+    'e2e/specs/login.ts': 'export function loginSpec() { return 1; }\n',
+    'e2e/fixtures/ignored.ts': 'export function ignoredFixture() { return 1; }\n',
+    'frontend/src/deal.js': 'export function updateProbability(status) { return status.length; }\n',
+    'frontend/src/page.js': 'import { updateProbability } from "./deal.js";\nexport function onStatusChange(s) { return updateProbability(s); }\n',
+  });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.writeFileSync(path.join(root, 'e2e', 'tsconfig.json'), JSON.stringify({ include: ['specs'] }));
+  const files = [...new Set(new RepositoryIndex(root).scan(100).nodes.map(node => node.file))].sort();
+  assert.deepEqual(files, ['e2e/specs/login.ts', 'frontend/src/deal.js', 'frontend/src/page.js']);
+  const adapter = new TypeScriptAdapter(root);
+  assert.deepEqual(adapter.reverseDependencies(adapter.findEntry({ file: 'frontend/src/deal.js', symbol: 'updateProbability' })).edges.map(edge => edge.target.name), ['onStatusChange']);
 });

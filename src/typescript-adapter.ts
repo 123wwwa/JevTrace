@@ -3,16 +3,39 @@ import fs from 'node:fs';
 import ts from 'typescript';
 import type { CodeNode, Dependency, DependencyScan, EdgeKind, EntryInput, LanguageAdapter, SourceLocation, SupportingContext, Unresolved } from './types.js';
 import { parseProjectConfigs, selectProjectFromParsed, type ParsedProjectConfig } from './project-config.js';
+import { isVueFile, scriptText, vueScript } from './vue.js';
 
-const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs']);
+const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.vue']);
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next']);
 function collectSources(dir: string, files: string[]): void {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (files.length >= 3000) throw new Error('Source file limit exceeded; add a tsconfig.json');
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory() && !ignored.has(entry.name)) collectSources(full, files);
+    if (entry.isDirectory() && !ignored.has(entry.name) && !entry.name.startsWith('.')) collectSources(full, files);
     else if (entry.isFile() && extensions.has(path.extname(entry.name)) && !entry.name.endsWith('.d.ts')) files.push(full);
   }
+}
+/** Root files of a repository without a tsconfig/jsconfig; above this many, only the entry's surroundings are roots. */
+const maxUnconfiguredRoots = 5000;
+/** How long the unconfigured file list is reused before the directory tree is walked again. */
+const unconfiguredListMs = 10_000;
+/**
+ * Every source file, or for a large repository the files under the entry's highest ancestor directory that
+ * holds at most `maxUnconfiguredRoots` of them. Files outside that directory the roots import are still loaded
+ * through module resolution; only their callers outside it are not searched.
+ */
+function unconfiguredScope(root: string, all: string[], entry: string): { directory: string; files: string[] } {
+  if (all.length <= maxUnconfiguredRoots) return { directory: root, files: all };
+  const under = (directory: string) => all.filter(file => file.startsWith(directory + path.sep));
+  let directory = path.dirname(entry);
+  let files = under(directory);
+  for (let parent = path.dirname(directory); parent.startsWith(root) && parent !== directory; parent = path.dirname(parent)) {
+    const wider = under(parent);
+    if (wider.length > maxUnconfiguredRoots) break;
+    directory = parent;
+    files = wider;
+    if (parent === root) break;
+  }
+  return { directory, files: files.length ? files : [entry] };
 }
 function declaration(node: ts.Node): ts.Node | undefined {
   if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isGetAccessor(node) || ts.isSetAccessor(node) || ts.isConstructorDeclaration(node) ||
@@ -22,18 +45,72 @@ function declaration(node: ts.Node): ts.Node | undefined {
   return undefined;
 }
 function named(node: ts.Node): string | undefined { return (node as ts.NamedDeclaration).name?.getText(); }
+/** The identifier that names a declaration unit; a `const f = () => …` statement is named by its variable. */
+function declarationName(node: ts.Node): ts.Node | undefined {
+  if (ts.isVariableStatement(node)) return node.declarationList.declarations[0]?.name;
+  if (ts.isConstructorDeclaration(node)) return (node.parent as ts.ClassDeclaration).name;
+  return (node as ts.NamedDeclaration).name;
+}
+/** `Class.member` for class members (the form discovery and the benchmark labels use), the plain name otherwise. */
+function qualifiedName(node: ts.Node, fallback: string): string {
+  const own = ts.isConstructorDeclaration(node) ? 'constructor' : declarationName(node)?.getText() ?? fallback;
+  const parts = [own];
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if ((ts.isClassDeclaration(parent) || ts.isClassExpression(parent)) && parent.name) parts.unshift(parent.name.getText());
+  }
+  return parts.join('.');
+}
+/** The innermost node containing a position. */
+function nodeAt(source: ts.SourceFile, position: number): ts.Node | undefined {
+  let found: ts.Node | undefined;
+  const visit = (current: ts.Node) => {
+    if (position < current.getStart(source) || position >= current.getEnd()) return;
+    found = current;
+    ts.forEachChild(current, visit);
+  };
+  ts.forEachChild(source, visit);
+  return found;
+}
+const clip = (text: string, max = 48) => {
+  const flat = text.replace(/\s+/g, ' ');
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+};
+/**
+ * A readable name for an anonymous function from where it sits, e.g. `registerTool('retrieve') callback`,
+ * `app.ontoolresult handler` or `options.onError`, instead of an opaque placeholder.
+ */
+function callbackName(fn: ts.Node): string {
+  const parent = fn.parent;
+  if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
+    const label = parent.arguments?.find(argument => ts.isStringLiteralLike(argument));
+    const callee = clip(parent.expression.getText(), 40);
+    return `${callee}(${label ? `'${clip((label as ts.StringLiteralLike).text, 40)}'` : ''}) callback`;
+  }
+  if (ts.isBinaryExpression(parent) && parent.right === fn) return `${clip(parent.left.getText())} handler`;
+  if (ts.isPropertyAssignment(parent)) {
+    const holder = parent.parent.parent;
+    const owner = holder && ts.isVariableDeclaration(holder) ? `${holder.name.getText()}.` : '';
+    return `${owner}${clip(parent.name.getText())}`;
+  }
+  if (ts.isReturnStatement(parent) || ts.isArrowFunction(parent)) {
+    const outer = callerOwner(parent.parent ?? parent);
+    if (outer) return `${outer.name} (returned function)`;
+  }
+  return '<anonymous function>';
+}
+
 function callerOwner(node: ts.Node): { node: ts.Node; name: string } | undefined {
   let current: ts.Node | undefined = node;
   while (current) {
     if (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current) || ts.isGetAccessor(current)
         || ts.isSetAccessor(current) || ts.isConstructorDeclaration(current)) {
-      return { node: current, name: named(current) ?? '<caller>' };
+      return { node: current, name: qualifiedName(current, '<anonymous function>') };
     }
     if (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) {
       const parent = current.parent;
       if (ts.isVariableDeclaration(parent)) return { node: parent.parent.parent, name: parent.name.getText() };
-      if (ts.isPropertyDeclaration(parent)) return { node: parent, name: named(parent) ?? '<caller>' };
-      return { node: current, name: '<caller>' };
+      if (ts.isPropertyDeclaration(parent)) return { node: parent, name: qualifiedName(parent, '<anonymous function>') };
+      return { node: current, name: callbackName(current) };
     }
     current = current.parent;
   }
@@ -43,10 +120,32 @@ const isTestFile = (file: string): boolean =>
   /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)/i.test(file) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
 /** Language services kept warm across tsconfig projects; switching back to a recent project reuses its program. */
 const maxWarmProjects = 4;
+/**
+ * A class's shape without its implementation: the heading plus one line per member (method and accessor
+ * signatures, property declarations). What an agent needs from a large class it only constructs or types against.
+ */
+const outlineMembers = 40;
+function classOutline(node: ts.ClassDeclaration, source: ts.SourceFile): string {
+  const text = source.text;
+  const heading = text.slice(node.getStart(source), node.members.pos).trim().replace(/\{$/, '').trim();
+  const members = node.members.slice(0, outlineMembers).map(member => {
+    const start = member.getStart(source);
+    const body = ts.isMethodDeclaration(member) || ts.isConstructorDeclaration(member) || ts.isGetAccessor(member) || ts.isSetAccessor(member)
+      ? member.body : undefined;
+    const head = body ? text.slice(start, body.getStart(source)) : text.slice(start, member.getEnd());
+    const line = head.replace(/\s+/g, ' ').trim().replace(/[{;]$/, '').trim();
+    return `  ${line.length > 160 ? `${line.slice(0, 159)}…` : line};`;
+  });
+  const more = node.members.length > outlineMembers ? [`  // … ${node.members.length - outlineMembers} more members`] : [];
+  return [`${heading} {`, ...members, ...more, '}'].join('\n');
+}
+
 function signature(node: ts.Node, source: ts.SourceFile): string {
+  // A Vue component's setup, used as a caller (see componentOwner).
+  if (ts.isSourceFile(node)) return `<script setup> of ${path.basename(node.fileName)}`;
   if (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node))
     return source.text.slice(node.getStart(source), node.body ? node.body.getStart(source) : node.getEnd()).trim();
-  if (ts.isClassDeclaration(node)) return source.text.slice(node.getStart(source), node.members.pos).trim() + ' { … }';
+  if (ts.isClassDeclaration(node)) return classOutline(node, source);
   if (ts.isVariableStatement(node)) return source.text.slice(node.getStart(source), Math.min(node.getEnd(), node.getStart(source) + 240)).split('\n')[0];
   return source.text.slice(node.getStart(source), Math.min(node.getEnd(), node.getStart(source) + 500));
 }
@@ -60,6 +159,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
   private readonly services = new Map<string, ts.LanguageService>();
   private readonly scanCache = new WeakMap<ts.Program, Map<string, DependencyScan>>();
   private readonly projectConfigs: ParsedProjectConfig[];
+  private unconfigured?: { at: number; files: string[] };
   constructor(readonly root: string) {
     this.projectConfigs = parseProjectConfigs(root).projects;
   }
@@ -90,9 +190,10 @@ export class TypeScriptAdapter implements LanguageAdapter {
     return this.toCodeNode(matches[0].node, matches[0].name);
   }
 
-  dependencies(node: CodeNode): DependencyScan {
+  dependencies(node: CodeNode, options: { values?: boolean } = {}): DependencyScan {
     if (!node.external) this.loadProgram(this.safePath(node.file));
-    return this.cachedScan(`forward:${node.id}`, () => this.scanDependencies(node));
+    const values = options.values === true;
+    return this.cachedScan(`forward:${values ? 'values:' : ''}${node.id}`, () => this.scanDependencies(node, values));
   }
 
   reverseDependencies(node: CodeNode): DependencyScan {
@@ -113,7 +214,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
     return { edges: [...result.edges], unresolved: [...result.unresolved] };
   }
 
-  private scanDependencies(node: CodeNode): DependencyScan {
+  private scanDependencies(node: CodeNode, values: boolean): DependencyScan {
     const source = this.program?.getSourceFile(path.resolve(this.root, node.file));
     const owner = source && this.findNode(source, node);
     if (!owner || !source || !this.checker || node.external) return { edges: [], unresolved: [] };
@@ -129,7 +230,10 @@ export class TypeScriptAdapter implements LanguageAdapter {
       if (!targetDeclaration) { unresolved.push({ kind, site, expression: expression.getText(source), reason: 'no source declaration' }); return; }
       const targetSource = targetDeclaration.getSourceFile();
       if (targetSource.isDeclarationFile && !targetSource.fileName.includes('node_modules')) return;
-      const target = this.toCodeNode(targetDeclaration, symbol.getName());
+      // TypeScript's own lib.*.d.ts (Promise, Response, parseInt, ...) and Node's built-in typings
+      // (crypto, fs, ...) never tell an agent anything about the repository.
+      if (this.program!.isSourceFileDefaultLibrary(targetSource) || /[\\/]node_modules[\\/]@types[\\/]node[\\/]/.test(targetSource.fileName)) return;
+      const target = this.toCodeNode(targetDeclaration, qualifiedName(targetDeclaration, symbol.getName()));
       if (target.id === node.id || (target.external && !targetSource.fileName.includes('node_modules'))) return;
       const edgeKind = kind === 'call' && ts.isCallExpression(siteNode) && ts.isPropertyAccessExpression(siteNode.expression) ? 'method' : kind;
       edges.set(target.id, { kind: alias && kind === 'call' ? 'import' : edgeKind, target, site });
@@ -140,128 +244,142 @@ export class TypeScriptAdapter implements LanguageAdapter {
         add(ts.isPropertyAccessExpression(expression) ? expression.name : expression, ts.isNewExpression(current) ? 'new' : 'call', current);
       } else if (ts.isJsxOpeningElement(current) || ts.isJsxSelfClosingElement(current)) add(current.tagName, 'jsx', current);
       else if (ts.isTypeReferenceNode(current)) add(ts.isQualifiedName(current.typeName) ? current.typeName.right : current.typeName, 'type', current);
+      // `class A extends B implements C`: the base class and the implemented interfaces are its contract.
+      else if (ts.isExpressionWithTypeArguments(current) && ts.isHeritageClause(current.parent)) {
+        add(ts.isPropertyAccessExpression(current.expression) ? current.expression.name : current.expression, 'type', current);
+      } else if (values && ts.isIdentifier(current) && isModuleConstant(current)) add(current, 'value', current);
       ts.forEachChild(current, visit);
+    };
+    // A reference to a top-level `const` whose initializer is data rather than a function (configuration
+    // objects, lookup tables, defaults). Function-valued constants are already reached through calls.
+    const isModuleConstant = (identifier: ts.Identifier): boolean => {
+      if (ts.isPropertyAccessExpression(identifier.parent) && identifier.parent.name === identifier) return false;
+      let symbol = this.checker!.getSymbolAtLocation(identifier);
+      if (!symbol) return false;
+      if (symbol.flags & ts.SymbolFlags.Alias) symbol = this.checker!.getAliasedSymbol(symbol);
+      const declaration = symbol.valueDeclaration;
+      if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.name === identifier || !declaration.initializer) return false;
+      const statement = declaration.parent.parent;
+      if (!ts.isVariableStatement(statement) || !ts.isSourceFile(statement.parent)) return false;
+      if (!(declaration.parent.flags & ts.NodeFlags.Const)) return false;
+      const initializer = declaration.initializer;
+      return !(ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer) || ts.isClassExpression(initializer));
     };
     ts.forEachChild(owner, visit);
     return { edges: [...edges.values()], unresolved };
   }
 
+  /**
+   * Who uses this declaration. Calls and constructions come from TypeScript's call hierarchy, which resolves
+   * import aliases, private `#members`, default exports and functions held in variables. Each call site is
+   * then attributed to the smallest enclosing function (an `it(...)` callback rather than the whole test
+   * module, which is how the call hierarchy groups anonymous callbacks). Type-level declarations are used
+   * through annotations rather than calls, so their users come from reference search.
+   */
   private scanReverseDependencies(node: CodeNode): DependencyScan {
     if (!this.program || !this.service) return { edges: [], unresolved: [] };
-    const entrySource = this.program.getSourceFile(path.resolve(this.root, node.file));
+    const program = this.program;
+    const service = this.service;
+    const entrySource = program.getSourceFile(path.resolve(this.root, node.file));
     const entryDeclaration = entrySource && this.findNode(entrySource, node);
-    const entryName = entryDeclaration && (entryDeclaration as ts.NamedDeclaration).name;
-    if (!entrySource || !entryName) return { edges: [], unresolved: [] };
-    const typeLike = ts.isInterfaceDeclaration(entryDeclaration) || ts.isTypeAliasDeclaration(entryDeclaration)
-      || ts.isEnumDeclaration(entryDeclaration) || ts.isClassDeclaration(entryDeclaration);
+    const entryName = entryDeclaration && declarationName(entryDeclaration);
+    if (!entrySource || !entryDeclaration || !entryName) return { edges: [], unresolved: [] };
     const edges = new Map<string, Dependency>();
-    const pending: Array<{ fileName: string; position: number }> = [{ fileName: entrySource.fileName, position: entryName.getStart(entrySource) }];
-    const searched = new Set<string>();
+    const record = (source: ts.SourceFile, site: ts.Node) => {
+      const owner = callerOwner(site) ?? this.componentOwner(source, site);
+      if (!owner) return;
+      const caller = this.toCodeNode(owner.node, owner.name);
+      if (caller.id === node.id || edges.has(caller.id)) return;
+      edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, site) });
+    };
+    const projectSource = (fileName: string) => {
+      if (!this.insideRoot(fileName)) return undefined;
+      const source = program.getSourceFile(fileName);
+      return source && !source.isDeclarationFile ? source : undefined;
+    };
 
-    while (pending.length) {
-      const current = pending.shift()!;
-      const key = `${current.fileName}:${current.position}`;
-      if (searched.has(key)) continue;
-      searched.add(key);
-      const references = this.service.findReferences(current.fileName, current.position) ?? [];
-      for (const group of references) for (const ref of group.references) {
-        if (!this.insideRoot(ref.fileName)) continue;
-        const source = this.program.getSourceFile(ref.fileName);
-        if (!source || source.isDeclarationFile) continue;
-        let siteNode: ts.Node | undefined;
-        const find = (candidate: ts.Node) => {
-          if (ref.textSpan.start < candidate.getStart(source) || ref.textSpan.start >= candidate.getEnd()) return;
-          siteNode = candidate;
-          ts.forEachChild(candidate, find);
-        };
-        find(source);
-        if (!siteNode) continue;
-
-        let imported: ts.Node | undefined = siteNode;
-        while (imported && !ts.isImportSpecifier(imported) && !ts.isImportClause(imported) && imported !== source) imported = imported.parent;
-        if (imported && imported !== source) {
-          let localName: ts.Identifier | undefined;
-          if (ts.isImportSpecifier(imported)) localName = imported.name;
-          else if (ts.isImportClause(imported)) localName = imported.name;
-          if (localName) pending.push({ fileName: source.fileName, position: localName.getStart(source) });
-          continue;
+    const prepared = service.prepareCallHierarchy(entrySource.fileName, entryName.getStart(entrySource));
+    const hierarchyItems = prepared ? ([] as ts.CallHierarchyItem[]).concat(prepared) : [];
+    for (const item of hierarchyItems) {
+      for (const call of service.provideCallHierarchyIncomingCalls(item.file, item.selectionSpan.start)) {
+        const source = projectSource(call.from.file);
+        if (!source) continue;
+        for (const span of call.fromSpans) {
+          const site = nodeAt(source, span.start);
+          if (site) record(source, site);
         }
-
-        if (ref.isDefinition) continue;
-        let call = siteNode;
-        while (call && !ts.isCallExpression(call) && !ts.isNewExpression(call)) call = call.parent;
-        if (!call || ref.textSpan.start < call.expression.getStart(source) || ref.textSpan.start >= call.expression.getEnd()) {
-          // Type-level targets are used through annotations and member access, not calls: record the enclosing callable.
-          const user = typeLike ? callerOwner(siteNode) : undefined;
-          if (user) {
-            const caller = this.toCodeNode(user.node, user.name);
-            if (caller.id !== node.id) edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, siteNode) });
-          }
-          continue;
-        }
-        const owner = callerOwner(call.parent);
-        if (!owner) continue;
-        const caller = this.toCodeNode(owner.node, owner.name);
-        edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, call) });
       }
     }
 
-    // LanguageService references can stop at an import alias definition. Recover cross-file
-    // callers with the checker, but only in files that actually import the target symbol.
-    const checker = this.checker;
-    if (checker) {
-      const resolvedNodeId = (identifier: ts.Identifier): string | undefined => {
-        let symbol = checker.getSymbolAtLocation(identifier);
-        if (!symbol) return undefined;
-        if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
-        const targetDeclaration = symbol.declarations?.map(declaration).find(Boolean);
-        if (!targetDeclaration) return undefined;
-        return this.toCodeNode(targetDeclaration, symbol.getName()).id;
+    // CommonJS: after `module.exports = { f }`, TypeScript resolves `require` uses only from the use site;
+    // neither the call hierarchy nor reference search reaches them from the declaration. For JavaScript
+    // entries, same-named identifiers elsewhere are kept when the checker resolves them back to the entry.
+    const target = this.checker?.getSymbolAtLocation(entryName);
+    if (target && /\.[cm]?jsx?$/i.test(entrySource.fileName)) {
+      const name = entryName.getText(entrySource);
+      // Names it is exported under: `{ g: f }` and `exports.g = f` rename it.
+      const names = new Set([name]);
+      const collect = (current: ts.Node) => {
+        if (ts.isPropertyAssignment(current) && ts.isIdentifier(current.initializer) && current.initializer.text === name) names.add(current.name.getText(entrySource));
+        else if (ts.isBinaryExpression(current) && ts.isPropertyAccessExpression(current.left) && ts.isIdentifier(current.right) && current.right.text === name) names.add(current.left.name.text);
+        ts.forEachChild(current, collect);
       };
-      for (const source of this.program.getSourceFiles()) {
-        if (source === entrySource || source.isDeclarationFile || !this.insideRoot(source.fileName)) continue;
-        let importsTarget = false;
-        for (const statement of source.statements) {
-          if (!ts.isImportDeclaration(statement) || !statement.importClause) continue;
-          const clause = statement.importClause;
-          if (clause.name) {
-            const resolved = resolvedNodeId(clause.name);
-            if (resolved === node.id) importsTarget = true;
-          }
-          if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-            for (const specifier of clause.namedBindings.elements) {
-              const resolved = resolvedNodeId(specifier.name);
-              if (resolved === node.id) importsTarget = true;
-            }
-          }
-          if (importsTarget) break;
-        }
-        if (!importsTarget) continue;
-
-        const visitCalls = (current: ts.Node) => {
-          if (ts.isCallExpression(current) || ts.isNewExpression(current)) {
-            const expression = current.expression;
-            const identifier = ts.isIdentifier(expression)
-              ? expression
-              : ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.name)
-                ? expression.name
-                : undefined;
-            if (identifier) {
-              const resolved = resolvedNodeId(identifier);
-              if (resolved !== node.id) { ts.forEachChild(current, visitCalls); return; }
-              const owner = callerOwner(current.parent);
-              if (owner) {
-                const caller = this.toCodeNode(owner.node, owner.name);
-                edges.set(caller.id, { kind: isTestFile(caller.file) ? 'test' : 'caller', target: caller, site: this.location(source, current) });
-              }
-            }
-          }
-          ts.forEachChild(current, visitCalls);
+      collect(entrySource);
+      for (const candidate of program.getSourceFiles()) {
+        const source = candidate !== entrySource && [...names].some(each => candidate.text.includes(each)) ? projectSource(candidate.fileName) : undefined;
+        if (!source) continue;
+        const visit = (current: ts.Node) => {
+          if (ts.isIdentifier(current) && names.has(current.text) && this.resolvesTo(current, target)) record(source, current);
+          ts.forEachChild(current, visit);
         };
-        visitCalls(source);
+        visit(source);
+      }
+    }
+
+    const typeLike = ts.isInterfaceDeclaration(entryDeclaration) || ts.isTypeAliasDeclaration(entryDeclaration)
+      || ts.isEnumDeclaration(entryDeclaration) || ts.isClassDeclaration(entryDeclaration);
+    // The call hierarchy does not cover every function form: a class property holding an arrow function
+    // (`#cachedBody = (key) => …`) prepares no item. Reference search finds those call sites instead.
+    if (typeLike || !hierarchyItems.length) {
+      for (const group of service.findReferences(entrySource.fileName, entryName.getStart(entrySource)) ?? []) {
+        for (const reference of group.references) {
+          if (reference.isDefinition) continue;
+          const source = projectSource(reference.fileName);
+          const site = source && nodeAt(source, reference.textSpan.start);
+          // Imports are not uses; calls and `new` were attributed above.
+          if (!source || !site || ts.findAncestor(site, ts.isImportDeclaration)) continue;
+          record(source, site);
+        }
       }
     }
     return { edges: [...edges.values()], unresolved: [] };
+  }
+
+  /** Top-level `<script setup>` code runs as the component's setup, so its calls belong to the component. */
+  private componentOwner(source: ts.SourceFile, site: ts.Node): { node: ts.Node; name: string } | undefined {
+    if (!isVueFile(source.fileName)) return undefined;
+    const text = ts.sys.readFile(source.fileName);
+    const setup = text === undefined ? undefined : vueScript(text, source.fileName).setup;
+    const position = site.getStart(source);
+    if (!setup || position < setup.start || position >= setup.end) return undefined;
+    return { node: source, name: `${path.basename(source.fileName)} <script setup>` };
+  }
+
+  /** Follows import aliases and CommonJS export objects (`{ f }`, `{ g: f }`, `exports.g = f`) to the exported symbol. */
+  private resolvesTo(identifier: ts.Identifier, target: ts.Symbol): boolean {
+    const checker = this.checker!;
+    let symbol = checker.getSymbolAtLocation(identifier);
+    for (let hop = 0; symbol && hop < 5; hop++) {
+      if (symbol === target) return true;
+      if (symbol.flags & ts.SymbolFlags.Alias) { symbol = checker.getAliasedSymbol(symbol); continue; }
+      const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+      if (!declaration) return false;
+      if (ts.isShorthandPropertyAssignment(declaration)) symbol = checker.getShorthandAssignmentValueSymbol(declaration);
+      else if (ts.isPropertyAssignment(declaration) && ts.isIdentifier(declaration.initializer)) symbol = checker.getSymbolAtLocation(declaration.initializer);
+      else if (ts.isBinaryExpression(declaration.parent) && declaration.parent.left === (declaration as ts.Node) && ts.isIdentifier(declaration.parent.right)) symbol = checker.getSymbolAtLocation(declaration.parent.right);
+      else return false;
+    }
+    return false;
   }
 
   supportingContext(node: CodeNode): SupportingContext[] {
@@ -331,16 +449,25 @@ export class TypeScriptAdapter implements LanguageAdapter {
     let files: string[];
     let options: ts.CompilerOptions;
     let projectReferences: readonly ts.ProjectReference[] | undefined;
+    let scopeDirectory = '';
     if (project) {
       files = project.parsed.fileNames;
       options = project.parsed.options;
       projectReferences = project.parsed.projectReferences;
     } else {
-      files = [];
-      collectSources(this.root, files);
+      if (!this.unconfigured || Date.now() - this.unconfigured.at > unconfiguredListMs) {
+        const all: string[] = [];
+        collectSources(path.resolve(this.root), all);
+        this.unconfigured = { at: Date.now(), files: all };
+      }
+      const scope = unconfiguredScope(path.resolve(this.root), this.unconfigured.files, path.resolve(entry));
+      files = scope.files;
+      scopeDirectory = scope.directory;
       options = { allowJs: true, checkJs: false, moduleResolution: ts.ModuleResolutionKind.Bundler, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, noEmit: true };
     }
-    const key = JSON.stringify([configPath ?? this.root, files, options, projectReferences]);
+    // Configs are parsed once, so a config path identifies its file list; hashing the list itself on every
+    // call cost more than the lookup in a repository with thousands of files.
+    const key = configPath ? `config:${configPath}` : `unconfigured:${scopeDirectory}:${files.length}:${files[0] ?? ''}:${files.at(-1) ?? ''}`;
     const warm = this.projectKey === key ? this.service : this.services.get(key);
     if (warm) {
       // Most-recently-used order: re-insert on every use.
@@ -357,6 +484,23 @@ export class TypeScriptAdapter implements LanguageAdapter {
       coldest.dispose();
       this.services.delete(coldestKey);
     }
+    const hasVue = files.some(isVueFile);
+    // Vue components are read through their script blocks (see vue.ts); the compiler accepts the extension.
+    if (hasVue) options = { ...options, allowNonTsExtensions: true };
+    const moduleHost: ts.ModuleResolutionHost = {
+      fileExists: ts.sys.fileExists, readFile: ts.sys.readFile, directoryExists: ts.sys.directoryExists,
+      getDirectories: ts.sys.getDirectories, realpath: ts.sys.realpath, useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    };
+    // `./Button.vue` or `@/components/Button.vue`: resolved as if `Button.vue.ts` existed, so `paths` aliases
+    // and base URLs apply exactly as they do for scripts, then mapped back to the component.
+    const vueModuleHost: ts.ModuleResolutionHost = { ...moduleHost, fileExists: file => /\.vue\.ts$/i.test(file) ? ts.sys.fileExists(file.slice(0, -3)) : ts.sys.fileExists(file) };
+    const resolutionCache = ts.createModuleResolutionCache(configPath ? path.dirname(configPath) : this.root, name => ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase(), options);
+    const extensionOf = (kind: ts.ScriptKind): ts.Extension =>
+      kind === ts.ScriptKind.TSX ? ts.Extension.Tsx : kind === ts.ScriptKind.TS ? ts.Extension.Ts : kind === ts.ScriptKind.JSX ? ts.Extension.Jsx : ts.Extension.Js;
+    const vueKind = (file: string): ts.ScriptKind => {
+      const text = ts.sys.readFile(file);
+      return text === undefined ? ts.ScriptKind.TS : vueScript(text, file).kind;
+    };
     const service = ts.createLanguageService({
       getCompilationSettings: () => options,
       getScriptFileNames: () => files,
@@ -365,8 +509,21 @@ export class TypeScriptAdapter implements LanguageAdapter {
       },
       getScriptSnapshot: file => {
         const text = ts.sys.readFile(file);
-        return text === undefined ? undefined : ts.ScriptSnapshot.fromString(text);
+        return text === undefined ? undefined : ts.ScriptSnapshot.fromString(scriptText(file, text));
       },
+      getScriptKind: file => isVueFile(file) ? vueKind(file) : ts.ScriptKind.Unknown,
+      ...(hasVue ? {
+        resolveModuleNameLiterals: (literals: readonly ts.StringLiteralLike[], containingFile: string, redirected: ts.ResolvedProjectReference | undefined, compilerOptions: ts.CompilerOptions, containingSource: ts.SourceFile) =>
+          literals.map(literal => {
+            const mode = ts.getModeForUsageLocation(containingSource, literal, compilerOptions);
+            if (!isVueFile(literal.text)) return ts.resolveModuleName(literal.text, containingFile, compilerOptions, moduleHost, resolutionCache, redirected, mode);
+            const resolved = ts.resolveModuleName(literal.text, containingFile, compilerOptions, vueModuleHost, undefined, redirected, mode);
+            const fileName = resolved.resolvedModule?.resolvedFileName;
+            if (!fileName || !/\.vue\.ts$/i.test(fileName)) return resolved;
+            const component = fileName.slice(0, -3);
+            return { resolvedModule: { resolvedFileName: component, extension: extensionOf(vueKind(component)), isExternalLibraryImport: false } };
+          }),
+      } : {}),
       getCurrentDirectory: () => configPath ? path.dirname(configPath) : this.root,
       getDefaultLibFileName: ts.getDefaultLibFilePath,
       getProjectReferences: () => projectReferences,
@@ -418,6 +575,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
     return { id: `${file}:${start}:${end}`, name, file,
       startLine: source.getLineAndCharacterOfPosition(start).line + 1,
       endLine: source.getLineAndCharacterOfPosition(end).line + 1,
-      source: source.text.slice(start, end), signature: signature(node, source), external: !this.insideRoot(source.fileName) || source.isDeclarationFile };
+      source: source.text.slice(start, end), signature: signature(node, source), external: !this.insideRoot(source.fileName) || source.isDeclarationFile,
+      ...(ts.isClassDeclaration(node) ? { outline: true } : {}) };
   }
 }

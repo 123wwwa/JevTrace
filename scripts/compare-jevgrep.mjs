@@ -143,7 +143,8 @@ if (!process.argv.includes('--skip-jevtrace')) {
     const started = performance.now();
     let text;
     try {
-      const result = await query(new RepositoryIndex(item.root), new TypeScriptAdapter(item.root), createJudge(process.env), item.task, undefined, {});
+      // Same budget rule as the MCP server at its default maxChars (30,000): the selection must fit the text.
+      const result = await query(new RepositoryIndex(item.root), new TypeScriptAdapter(item.root), createJudge(process.env), item.task, undefined, { tokenBudget: Math.floor((30000 - 5000) / 4) });
       text = 'items' in result ? formatContext(result, 30000) : result.warnings.join('\n');
     } catch (error) {
       text = `ERROR: ${error instanceof Error ? error.message : String(error)}`;

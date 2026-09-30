@@ -1,7 +1,8 @@
 import { performance } from 'node:perf_hooks';
-import type { Candidate, CodeNode, EdgeKind, JudgeCallResult, JudgeCallStats, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
+import type { Candidate, CodeNode, Dependency, EdgeKind, JudgeCallResult, JudgeCallStats, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
 import { discoverEntries, type DiscoveryOptions, type DiscoveryResult, type RepositoryIndex } from './discovery.js';
 import type { ContextItem, JudgeRoundTrace, RetrievalOptions, RetrievalResult } from './retrieve.js';
+import { broadTaskGuidance, broadTaskThreshold, repositoryMap, sourceInventory, suggestSubtasks, type BroadTaskResult } from './broad-task.js';
 
 export interface TaskPipelineOptions extends RetrievalOptions, DiscoveryOptions {
   perLeadNodeLimit?: number;
@@ -11,11 +12,16 @@ export interface TaskPipelineOptions extends RetrievalOptions, DiscoveryOptions 
   includeLexicalParallel?: boolean;
   includeCompilerExpansion?: boolean;
   contextRanking?: 'jev' | 'structural';
+  /** Ask the discovery judge whether the task is project-wide before returning code (default true). */
+  scopeCheck?: boolean;
+  /** Size limit of the repository map returned for a project-wide task (default 20,000 characters). */
+  mapChars?: number;
 }
 
 export interface NeighborhoodItem {
   node: CodeNode;
-  depth: 0 | 1;
+  /** 0 lead, 1 direct neighbour, 2 sibling (called alongside the lead by its caller). */
+  depth: 0 | 1 | 2;
   kinds: EdgeKind[];
   leadIds: string[];
   leadNames: string[];
@@ -58,6 +64,16 @@ const signatureTokens = (node: CodeNode): number => Math.ceil(node.signature.len
 const capCost = (used: number, item: NeighborhoodItem, cap: number): number | undefined =>
   used + item.estimatedTokens <= cap ? item.estimatedTokens
     : used + signatureTokens(item.node) <= cap ? signatureTokens(item.node) : undefined;
+const maxTestCallersPerLead = 3;
+const maxSiblingsPerLead = 4;
+/** Above this many estimated tokens a non-lead class is returned as its member outline. */
+const largeClassTokens = 800;
+/** Across all leads; leads are expanded best-first, so the strongest leads' tests are kept. */
+const maxTestCallersTotal = 4;
+/** Users of type-level leads kept across all of them. */
+const maxTypeLeadUsers = 3;
+/** A lead with more callers than this is treated as a hub: only its most task-related users are kept. */
+const hubCallers = 25;
 const edgePrior: Record<EdgeKind, number> = {
   caller: 0.95,
   call: 0.92,
@@ -65,6 +81,8 @@ const edgePrior: Record<EdgeKind, number> = {
   new: 0.9,
   jsx: 0.88,
   test: 0.86,
+  value: 0.8,
+  sibling: 0.6,
   import: 0.72,
   type: 0.55,
   lexical: 0.5,
@@ -87,7 +105,7 @@ export async function retrieveTaskContext(
   contextJudge: RelevanceJudge,
   task: string,
   options: TaskPipelineOptions = {},
-): Promise<TaskPipelineResult | { task: string; status: 'incomplete'; discovery: DiscoveryResult; warnings: string[] }> {
+): Promise<TaskPipelineResult | BroadTaskResult | { task: string; status: 'incomplete'; discovery: DiscoveryResult; warnings: string[] }> {
   options.signal?.throwIfAborted();
   const tokenBudget = options.tokenBudget ?? 8000;
   const maxLeads = options.maxLeads ?? 4;
@@ -105,13 +123,51 @@ export async function retrieveTaskContext(
   if (!Number.isInteger(neighborhoodTokenBudget) || neighborhoodTokenBudget < tokenBudget) throw new Error('neighborhoodTokenBudget must be >= tokenBudget');
   if (!Number.isInteger(lexicalMergeLimit) || lexicalMergeLimit < 0 || lexicalMergeLimit > 128) throw new Error('lexicalMergeLimit must be between 0 and 128');
 
-  const discovery = await discoverEntries(
-    index,
-    discoveryJudge,
-    task,
-    { ...options, maxCandidates: options.maxCandidates ?? 64, maxLeads },
-    adapter,
-  );
+  // The scope question runs alongside discovery, so a specific task pays no extra latency; a project-wide
+  // task stops discovery, since any code it picked would be arbitrary.
+  const discoveryAbort = new AbortController();
+  const forwardAbort = () => discoveryAbort.abort(options.signal?.reason);
+  options.signal?.addEventListener('abort', forwardAbort, { once: true });
+  let discovery: DiscoveryResult;
+  const scopeNotes: string[] = [];
+  let scope: Awaited<ReturnType<NonNullable<RelevanceJudge['judgeTaskScope']>>> | undefined;
+  try {
+    const scopeCheck = options.scopeCheck !== false && discoveryJudge.judgeTaskScope
+      ? discoveryJudge.judgeTaskScope(task, options.signal).catch((error: unknown) => {
+        options.signal?.throwIfAborted();
+        scopeNotes.push(`Task scope check failed; retrieved as a specific task: ${error instanceof Error ? error.message : String(error)}`);
+        return undefined;
+      })
+      : undefined;
+    const discoveryRun = discoverEntries(
+      index,
+      discoveryJudge,
+      task,
+      { ...options, maxCandidates: options.maxCandidates ?? 64, maxLeads, signal: discoveryAbort.signal },
+      adapter,
+    );
+    // Rejections after an abort below are expected; the awaited path still sees real failures.
+    discoveryRun.catch(() => undefined);
+    scope = await scopeCheck;
+    if (scope?.specificity !== undefined && scope.specificity < broadTaskThreshold) {
+      discoveryAbort.abort(new Error('Project-wide task'));
+      const inventory = sourceInventory(index, options.maxFiles);
+      const subtasks = suggestSubtasks(task, inventory);
+      const guidance = broadTaskGuidance(scope.specificity, subtasks);
+      return {
+        task, status: 'broad', specificity: scope.specificity, guidance, subtasks,
+        map: repositoryMap(inventory, Math.max(500, (options.mapChars ?? 20_000) - guidance.length)),
+        warnings: [], scopeStats: scope.stats,
+      };
+    }
+    discovery = await discoveryRun;
+  } finally {
+    options.signal?.removeEventListener('abort', forwardAbort);
+  }
+  discovery.warnings.push(...scopeNotes);
+  // Billed like any other discovery request.
+  // A new object: the per-stage stats may share one array.
+  if (scope) discovery.judgeStats = { batches: [...discovery.judgeStats.batches, ...scope.stats.batches] };
   if (!discovery.semanticLeads.length) {
     return {
       task,
@@ -123,7 +179,12 @@ export async function retrieveTaskContext(
 
   const terms = taskTokens(task);
   const unresolved: Unresolved[] = [];
-  const warnings = [...discovery.warnings];
+  // warnings: something degraded the result (a failed provider stage, an unresolvable lead). notes: normal
+  // bounds and static-analysis limits, reported so they can be inspected without reading as a failure.
+  const informational = (message: string) => /^(Task scope check failed|Lexical RRF retained|Jev directory pass selected|Jev repository-structure discovery is disabled|Skipped source larger than 1 MiB)/.test(message)
+    || /analysed without their base config/.test(message);
+  const warnings = discovery.warnings.filter(message => !informational(message));
+  const notes = discovery.warnings.filter(informational);
   let reversePruned = 0;
   let perLeadPruned = 0;
   const rawCompiler = new Map<string, NeighborhoodItem>();
@@ -138,7 +199,7 @@ export async function retrieveTaskContext(
     }
     existing.structuralScore = Math.max(existing.structuralScore, item.structuralScore);
     existing.semanticScore = Math.max(existing.semanticScore ?? 0, item.semanticScore ?? 0) || undefined;
-    existing.depth = Math.min(existing.depth, item.depth) as 0 | 1;
+    existing.depth = Math.min(existing.depth, item.depth) as 0 | 1 | 2;
     existing.kinds = [...new Set([...existing.kinds, ...item.kinds])];
     existing.leadIds = [...new Set([...existing.leadIds, ...item.leadIds])];
     existing.leadNames = [...new Set([...existing.leadNames, ...item.leadNames])];
@@ -146,6 +207,8 @@ export async function retrieveTaskContext(
     if (!existing.site && item.site) existing.site = item.site;
   };
 
+  let testsKeptTotal = 0;
+  let typeUsersKept = 0;
   for (const lead of discovery.semanticLeads.slice(0, maxLeads)) {
     options.signal?.throwIfAborted();
     let node: CodeNode;
@@ -174,24 +237,48 @@ export async function retrieveTaskContext(
       continue;
     }
 
-    const forward = adapter.dependencies(node);
+    const forward = adapter.dependencies(node, { values: true });
     const reverse = adapter.reverseDependencies(node);
     unresolved.push(...forward.unresolved, ...reverse.unresolved);
-    let reverseEdges = reverse.edges;
-    if (reverseEdges.length > reverseFanIn) {
-      const before = reverseEdges.length;
-      reverseEdges = reverseEdges
-        .map(edge => ({ edge, taskScore: lexicalEdgeScore(edge.target.name, edge.target.file, edge.site, terms), prior: edgePrior[edge.kind] }))
-        .sort((a, b) => b.taskScore - a.taskScore || b.prior - a.prior || a.edge.target.id.localeCompare(b.edge.target.id))
-        .slice(0, reverseFanIn)
-        .map(item => item.edge);
-      reversePruned += before - reverseEdges.length;
-    }
+    // Most task-related callers first. Tests are capped per lead: a widely used helper can have dozens of
+    // test callers, and in real use they crowded out implementation code without helping the agent.
+    const rankedReverse = reverse.edges
+      .map(edge => ({ edge, taskScore: lexicalEdgeScore(edge.target.name, edge.target.file, edge.site, terms), prior: edgePrior[edge.kind] }))
+      .sort((a, b) => b.taskScore - a.taskScore || b.prior - a.prior || a.edge.target.id.localeCompare(b.edge.target.id))
+      .map(item => item.edge);
+    // A type-level lead (a status-code union, an options interface) can be used all over the repository;
+    // its users are mostly unrelated to the task, so only the few most task-related are kept, and no tests.
+    // Same for a hub: a lead used from dozens of places (a context getter, a shared helper) brings callers
+    // that have nothing to do with the task.
+    const typeLead = lead.typeLevel === true || reverse.edges.length > hubCallers;
+    let testsKept = 0;
+    const reverseEdges = rankedReverse
+      .filter(edge => edge.kind !== 'test' || (!typeLead && testsKept < maxTestCallersPerLead && testsKeptTotal < maxTestCallersTotal && (++testsKept, ++testsKeptTotal, true)))
+      .slice(0, typeLead ? Math.max(0, Math.min(reverseFanIn, maxTypeLeadUsers - typeUsersKept)) : reverseFanIn);
+    if (typeLead) typeUsersKept += reverseEdges.length;
+    reversePruned += rankedReverse.length - reverseEdges.length;
 
-    const candidates = [...forward.edges, ...reverseEdges].map(edge => ({
+    // Helpers declared inside the lead are part of its own body: returned with it, or noise when the lead
+    // itself is cut to a signature.
+    const insideLead = (target: CodeNode) => target.file === node.file && target.startLine >= node.startLine && target.endLine <= node.endLine;
+    // Siblings: what the lead's same-file callers call alongside it. A caller that uses the lead together
+    // with other local helpers (splitSource calling textUnits and sourceText) usually needs them changed
+    // together; this is the one bounded two-hop step, kept to the lead's file.
+    const siblingEdges: Dependency[] = [];
+    const seenSiblings = new Set([node.id]);
+    for (const caller of reverseEdges) {
+      if (caller.kind !== 'caller' || caller.target.file !== node.file || siblingEdges.length >= maxSiblingsPerLead) continue;
+      for (const next of adapter.dependencies(caller.target).edges) {
+        if (siblingEdges.length >= maxSiblingsPerLead) break;
+        if (!['call', 'method', 'import'].includes(next.kind) || next.target.file !== node.file || seenSiblings.has(next.target.id) || insideLead(next.target)) continue;
+        seenSiblings.add(next.target.id);
+        siblingEdges.push({ ...next, kind: 'sibling' });
+      }
+    }
+    const candidates = [...forward.edges.filter(edge => !insideLead(edge.target)), ...reverseEdges, ...siblingEdges].map(edge => ({
       item: {
         node: edge.target,
-        depth: 1 as const,
+        depth: (edge.kind === 'sibling' ? 2 : 1) as 1 | 2,
         kinds: [edge.kind],
         leadIds: [node.id],
         leadNames: [node.name],
@@ -241,9 +328,9 @@ export async function retrieveTaskContext(
     return true;
   });
   const totalPruned = beforeTotalCap - compilerItems.length;
-  if (perLeadPruned) warnings.push(`${perLeadPruned} per-lead compiler candidates were pruned by node/token bounds`);
-  if (totalPruned) warnings.push(`${totalPruned} merged compiler candidates were pruned by neighborhoodTokenBudget=${neighborhoodTokenBudget}`);
-  if (reversePruned) warnings.push(`${reversePruned} reverse caller/test edges were pruned by reverseFanIn=${reverseFanIn}`);
+  if (perLeadPruned) notes.push(`${perLeadPruned} per-lead compiler candidates were pruned by node/token bounds`);
+  if (totalPruned) notes.push(`${totalPruned} merged compiler candidates were pruned by neighborhoodTokenBudget=${neighborhoodTokenBudget}`);
+  if (reversePruned) notes.push(`${reversePruned} reverse caller/test edges were pruned by reverseFanIn=${reverseFanIn}`);
 
   const neighborhoodStats: NeighborhoodStats = {
     rawSymbols: rawCompilerItems.length,
@@ -360,31 +447,55 @@ export async function retrieveTaskContext(
   // the signature, otherwise omitted. Pass 2 spends what is left upgrading signatures back to bodies in
   // ranking order. (Starting large bodies at signature was tried and dropped: it demoted large owners
   // such as jevgrep's selectFile that the task needs in full.)
+  //
+  // Nested declarations overlap: a class body already contains its methods, a method its inner helpers.
+  // Returning both sent the same lines twice and spent the budget on duplicates, so an item inside a
+  // returned body is skipped as covered, and an item that would wrap a returned body is given as a signature.
   const levels = new Map<NeighborhoodItem, 'body' | 'signature'>();
+  const covered = new Set<NeighborhoodItem>();
+  const bodies: NeighborhoodItem[] = [];
+  const contains = (outer: NeighborhoodItem, inner: NeighborhoodItem) => outer !== inner && outer.node.file === inner.node.file
+    && outer.node.startLine <= inner.node.startLine && outer.node.endLine >= inner.node.endLine;
   let usedTokens = 0;
+  // A large class reached from a lead (constructed or used as a type) is given as its member outline:
+  // the agent needs its API, not hundreds of lines of unrelated methods. Leads keep their bodies.
+  const outlineOnly = (item: NeighborhoodItem) => item.depth === 1 && item.node.outline === true && item.estimatedTokens > largeClassTokens;
   for (const item of rankingItems) {
+    if (bodies.some(body => contains(body, item))) { covered.add(item); continue; }
     const signatureCost = signatureTokens(item.node);
-    if (!item.node.external && usedTokens + item.estimatedTokens <= tokenBudget) {
+    if (outlineOnly(item)) {
+      if (usedTokens + signatureCost <= tokenBudget) { levels.set(item, 'signature'); usedTokens += signatureCost; }
+      continue;
+    }
+    // An item that encloses bodies already returned (a function around its own inner helpers) replaces
+    // them when it fits: its body includes theirs, so their tokens are refunded instead of duplicated.
+    const inner = bodies.filter(body => contains(item, body));
+    const refund = inner.reduce((sum, body) => sum + body.estimatedTokens, 0);
+    if (!item.node.external && usedTokens - refund + item.estimatedTokens <= tokenBudget) {
+      for (const body of inner) { levels.delete(body); covered.add(body); bodies.splice(bodies.indexOf(body), 1); }
       levels.set(item, 'body');
-      usedTokens += item.estimatedTokens;
+      bodies.push(item);
+      usedTokens += item.estimatedTokens - refund;
     } else if (usedTokens + signatureCost <= tokenBudget) {
       levels.set(item, 'signature');
       usedTokens += signatureCost;
     }
   }
   for (const item of rankingItems) {
-    if (levels.get(item) !== 'signature' || item.node.external) continue;
+    if (levels.get(item) !== 'signature' || item.node.external || outlineOnly(item) || bodies.some(body => contains(item, body) || contains(body, item))) continue;
     const extra = item.estimatedTokens - signatureTokens(item.node);
     if (usedTokens + extra <= tokenBudget) {
       levels.set(item, 'body');
+      bodies.push(item);
       usedTokens += extra;
     }
   }
   const selected = rankingItems.filter(item => levels.has(item));
-  const omittedPool = rankingItems.filter(item => !levels.has(item));
+  const omittedPool = rankingItems.filter(item => !levels.has(item) && !covered.has(item));
+  if (covered.size) notes.push(`${covered.size} candidates were already inside other returned code`);
   const downgraded = selected.filter(item => levels.get(item) === 'signature' && !item.node.external).length;
-  if (downgraded) warnings.push(`${downgraded} ranking-pool candidates were reduced to signatures by final tokenBudget=${tokenBudget}`);
-  if (omittedPool.length) warnings.push(`${omittedPool.length} ranking-pool candidates were omitted by final tokenBudget=${tokenBudget}`);
+  if (downgraded) notes.push(`${downgraded} ranking-pool candidates were reduced to signatures by final tokenBudget=${tokenBudget}`);
+  if (omittedPool.length) notes.push(`${omittedPool.length} ranking-pool candidates were omitted by final tokenBudget=${tokenBudget}`);
 
   const primaryLead = semanticLeads[0];
   const toContextItem = (item: NeighborhoodItem, level: 'body' | 'signature' | 'omitted'): ContextItem => ({
@@ -415,12 +526,12 @@ export async function retrieveTaskContext(
     batchLatenciesMs: batches.map(batch => batch.latencyMs),
   }] : [];
 
-  if (unresolved.length) warnings.push(`${unresolved.length} references could not be resolved statically`);
+  if (unresolved.length) notes.push(`${unresolved.length} dynamic or external references were not followed (static analysis limit)`);
 
   return {
     task,
     judge: contextRankingApplied ? contextJudge.name : 'structural-budget',
-    status: warnings.length || unresolved.length ? 'incomplete' : 'complete',
+    status: warnings.length ? 'incomplete' : 'complete',
     entry: primaryLead,
     items,
     omitted,
@@ -438,6 +549,7 @@ export async function retrieveTaskContext(
     judgeRounds: contextRankingApplied ? 1 : 0,
     judgeTrace,
     warnings,
+    notes,
     discovery,
     semanticLeads,
     neighborhood: { items: compilerItems, stats: neighborhoodStats },

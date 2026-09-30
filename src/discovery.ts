@@ -4,13 +4,29 @@ import { performance } from 'node:perf_hooks';
 import ts from 'typescript';
 import type { CodeNode, JudgeCallStats, Judgment, LanguageAdapter, RelevanceJudge } from './types.js';
 import { parseProjectConfigs } from './project-config.js';
+import { isVueFile, vueScript } from './vue.js';
 
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo']);
-const sourceFile = /\.[cm]?[jt]sx?$/;
+/**
+ * Source files indexed for discovery. Indexing about 5,400 files took 5.5 s cold and 0.6 s warm and kept
+ * 16 KB per file (Dify), so this bounds the index near 320 MB; in a sample of active GitHub JS/TS
+ * repositories about 2% have more source files than this.
+ */
+export const defaultMaxFiles = 20_000;
+const sourceFile = /\.(?:[cm]?[jt]sx?|vue)$/;
 const declarationFile = /\.d\.[cm]?ts$/;
 const stopWords = new Set('a an the is are to of for in on and or how change fix add implement with when should from'.split(' '));
 const tokenize = (text: string): string[] =>
   text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+// Index fields repeat the same identifiers across thousands of files; one shared string per token keeps the
+// index of a large repository several times smaller.
+const interned = new Map<string, string>();
+const intern = (tokens: string[]): string[] => tokens.map(token => {
+  const shared = interned.get(token);
+  if (shared !== undefined) return shared;
+  interned.set(token, token);
+  return token;
+});
 const bm25 = (tf: number, length: number, avgLength: number, idf: number, k1 = 1.2, b = 0.75): number => {
   if (!tf) return 0;
   const norm = tf + k1 * (1 - b + b * (length / Math.max(avgLength, 1)));
@@ -28,7 +44,8 @@ interface SearchFields {
   literals: string[];
 }
 
-type ScanResult = { nodes: CodeNode[]; scannedFiles: number; warnings: string[] };
+const testFile = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
+type ScanResult ={ nodes: CodeNode[]; scannedFiles: number; warnings: string[] };
 /** A directory scope is split into child scopes once its subtree holds more files than this. */
 const maxScopeFiles = 64;
 
@@ -143,23 +160,29 @@ export class RepositoryIndex {
     const projectInventory = parseProjectConfigs(root);
     warnings.push(...projectInventory.warnings);
     const configuredFiles = new Set(projectInventory.projects.flatMap(project => [...project.files]));
-    const hasConfiguredProjects = projectInventory.projects.length > 0;
+    // A config owns the directory it sits in: files there that it does not include are left out. Files under
+    // no config (a front end next to an `e2e/tsconfig.json`) are searched and analysed without one.
+    const configDirectories = [...new Set(projectInventory.projects.map(project => path.dirname(path.resolve(project.path))))];
+    const excluded = (file: string): boolean => !configuredFiles.has(file)
+      && configDirectories.some(directory => file.startsWith(directory + path.sep));
 
     let scannedFiles = 0;
+    let limitReached: string | undefined;
     const walk = (directory: string): void => {
       signal?.throwIfAborted();
       for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
         signal?.throwIfAborted();
         if (scannedFiles >= maxFiles) {
-          warnings.push(`Discovery file limit reached (${maxFiles})`);
+          limitReached ??= path.relative(this.root, path.join(directory, entry.name)).replaceAll('\\', '/');
           return;
         }
         const full = path.join(directory, entry.name);
         if (entry.isDirectory() && !ignored.has(entry.name) && !entry.name.startsWith('.')) {
           walk(full);
         } else if (entry.isFile() && sourceFile.test(entry.name) && !declarationFile.test(entry.name)) {
+          // Only files a project includes count toward the limit; excluded ones are never indexed.
+          if (excluded(path.resolve(full))) continue;
           scannedFiles++;
-          if (hasConfiguredProjects && !configuredFiles.has(path.resolve(full))) continue;
           const stat = fs.statSync(full, { bigint: true });
           if (stat.size > 1024n * 1024n) {
             warnings.push(`Skipped source larger than 1 MiB: ${path.relative(this.root, full)}`);
@@ -170,8 +193,11 @@ export class RepositoryIndex {
           const version = `${stat.mtimeNs}:${stat.size}`;
           let cached = this.cache.get(full);
           if (!cached || cached.version !== version) {
-            const text = fs.readFileSync(full, 'utf8');
-            const source = ts.createSourceFile(full, text, ts.ScriptTarget.Latest, true);
+            const raw = fs.readFileSync(full, 'utf8');
+            // A Vue component is indexed through its script blocks, at their own positions.
+            const vue = isVueFile(full) ? vueScript(raw, full) : undefined;
+            const text = vue?.text ?? raw;
+            const source = ts.createSourceFile(full, text, ts.ScriptTarget.Latest, true, vue?.kind);
             const file = path.relative(this.root, full).replaceAll('\\', '/');
             const declarations: CodeNode[] = [];
             const fields = new Map<string, SearchFields>();
@@ -191,7 +217,9 @@ export class RepositoryIndex {
                   || ts.isGetAccessor(member) || ts.isSetAccessor(member)
                   || (ts.isPropertyDeclaration(member) && member.initializer !== undefined
                     && (ts.isArrowFunction(member.initializer) || ts.isFunctionExpression(member.initializer)))));
-              if (ownName && (isCallable || isValue || isTypeLike)) {
+              // Overload signatures have no body; the implementation that follows them is the lead.
+              const isOverloadSignature = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && !node.body;
+              if (ownName && !isOverloadSignature && (isCallable || isValue || isTypeLike)) {
                 const owner = ts.isVariableDeclaration(node) ? node.parent.parent : node;
                 const start = owner.getStart(source);
                 const end = owner.getEnd();
@@ -222,11 +250,11 @@ export class RepositoryIndex {
                 // Type-level declarations are semantic leads only: their property names and doc comments
                 // would otherwise let large option interfaces dominate lexical ranking.
                 if (!isTypeLike) fields.set(id, {
-                  name: tokenize(name),
-                  path: tokenize(file),
-                  signature: tokenize(signature),
-                  identifiers: identifierTokens,
-                  literals: literalTokens,
+                  name: intern(tokenize(name)),
+                  path: intern(tokenize(file)),
+                  signature: intern(tokenize(signature)),
+                  identifiers: intern(identifierTokens),
+                  literals: intern(literalTokens),
                 });
                 return;
               }
@@ -241,6 +269,7 @@ export class RepositoryIndex {
       }
     };
     walk(root);
+    if (limitReached) warnings.push(`Discovery file limit reached (${maxFiles} source files): ${limitReached} and later paths (in name order) were not searched; raise maxFiles to search them`);
     for (const file of this.cache.keys()) if (!seen.has(file)) this.cache.delete(file);
     return { nodes, scannedFiles, warnings: unique(warnings) };
   }
@@ -444,7 +473,7 @@ export async function discoverEntries(
   if (!task.trim()) throw new Error('Task must not be empty');
   const maxCandidates = options.maxCandidates ?? 64;
   const maxLeads = options.maxLeads ?? 4;
-  const maxFiles = options.maxFiles ?? 3000;
+  const maxFiles = options.maxFiles ?? defaultMaxFiles;
   const maxJevFiles = options.maxJevFiles ?? 256;
   const maxRelevantDirectories = options.maxRelevantDirectories ?? 8;
   const maxRelevantFiles = options.maxRelevantFiles ?? 8;
@@ -453,7 +482,7 @@ export async function discoverEntries(
   const lexicalRescueFiles = options.lexicalRescueFiles ?? 4;
   if (!Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 128) throw new Error('maxCandidates must be between 1 and 128');
   if (!Number.isInteger(maxLeads) || maxLeads < 1 || maxLeads > 8) throw new Error('maxLeads must be between 1 and 8');
-  if (!Number.isInteger(maxFiles) || maxFiles < 1 || maxFiles > 10000) throw new Error('maxFiles must be between 1 and 10000');
+  if (!Number.isInteger(maxFiles) || maxFiles < 1 || maxFiles > 100000) throw new Error('maxFiles must be between 1 and 100000');
   if (!Number.isInteger(maxJevFiles) || maxJevFiles < 1 || maxJevFiles > 1000) throw new Error('maxJevFiles must be between 1 and 1000');
   if (!Number.isInteger(maxRelevantDirectories) || maxRelevantDirectories < 1 || maxRelevantDirectories > 32) throw new Error('maxRelevantDirectories must be between 1 and 32');
   if (!Number.isInteger(maxRelevantFiles) || maxRelevantFiles < 1 || maxRelevantFiles > 32) throw new Error('maxRelevantFiles must be between 1 and 32');
@@ -621,8 +650,15 @@ export async function discoverEntries(
 
     // Callables are considered before type-level leads: types are usually reached by compiler expansion,
     // and letting them take lead slots displaced needed callables on the development set.
+    // Declarations inside test files come last as well: tests are reached from implementation leads as
+    // their test callers, while a test-file helper (a stream's `start`, a request builder) makes a poor lead.
     const qualifying = leads.filter(lead => (lead.score ?? 0) >= minLeadScore);
-    const eligible = [...qualifying.filter(lead => !lead.typeLevel), ...qualifying.filter(lead => lead.typeLevel)];
+    const inTests = (lead: EntryLead) => testFile.test(lead.file);
+    const eligible = [
+      ...qualifying.filter(lead => !lead.typeLevel && !inTests(lead)),
+      ...qualifying.filter(lead => lead.typeLevel && !inTests(lead)),
+      ...qualifying.filter(inTests),
+    ];
     const semanticLeads: EntryLead[] = [];
     const deferred: EntryLead[] = [];
     const graphCache = new Map<string, Set<string>>();
@@ -635,7 +671,10 @@ export async function discoverEntries(
         try {
           const node = adapter.findEntry({ file: lead.file, line: lead.line, endLine: lead.endLine, symbol: lead.name });
           ids.add(node.id);
-          for (const edge of [...adapter.dependencies(node).edges, ...adapter.reverseDependencies(node).edges]) ids.add(edge.target.id);
+          // Redundancy is judged on what a lead uses, not on who calls it: two leads called by the same
+          // orchestrator (a request handler, say) are parts of one change, not duplicates. Counting shared
+          // callers dropped, for example, the usage logger next to the judge factory both handlers call.
+          for (const edge of adapter.dependencies(node).edges) ids.add(edge.target.id);
         } catch {
           // Diversity is best effort. Stage 3 will surface resolution failures.
         }
@@ -649,6 +688,8 @@ export async function discoverEntries(
       const candidateGraph = graphSet(lead);
       const overlaps = semanticLeads.some(selected => {
         if (selected.file === lead.file && selected.line === lead.line) return true;
+        // Copies of the same code in two places (a package and its vendored twin) are one lead, not two.
+        if (selected.name === lead.name && selected.signature.replace(/\s+/g, ' ') === lead.signature.replace(/\s+/g, ' ')) return true;
         const selectedGraph = graphSet(selected);
         if (!candidateGraph.size || !selectedGraph.size) return false;
         const intersection = [...candidateGraph].filter(id => selectedGraph.has(id)).length;

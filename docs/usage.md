@@ -8,6 +8,21 @@ npm run build
 npm test
 ```
 
+## Supported projects
+
+JevTrace analyses JavaScript and TypeScript through the TypeScript compiler, so it supports what the compiler reads and nothing else:
+
+| | Supported | Not supported |
+| --- | --- | --- |
+| Files | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`; `.vue` single-file components (`<script>` and `<script setup>`, JS or TS) | Vue template expressions (a method called only from the template shows no caller); `.svelte`, `.astro`, scripts inside HTML; `.d.ts` files are not entry points |
+| Modules | ES modules, CommonJS (`require`, `module.exports`, `exports.x`), TypeScript path aliases, including `.vue` imports through them | Dynamic `import()` / `require` with computed paths |
+| Project config | `tsconfig*.json` and `jsconfig*.json`, several per repository (monorepos: each file uses the most specific project that includes it); a base config that is not installed (`"extends": "@org/tsconfig"` before `npm install`) is skipped with a note | Build-tool-only aliases (webpack/Vite `resolve.alias`) that are not mirrored in `paths` |
+| No config | Every source file, analysed with `allowJs`; above 5,000 files the compiler loads the files around the entry (its highest ancestor directory holding at most 5,000), and imports outside it are still followed | Callers outside that directory in such a repository |
+| Size | Discovery indexes up to 20,000 source files (`maxFiles`, up to 100,000); about 5.5 s the first time and 0.6 s after for 5,400 files | Beyond `maxFiles`, later paths in name order are not searched, and the result says so |
+| Tasks | One behaviour, feature or area ("where is X decided", "change how Y works"), in any language | Project-wide requests (review everything, find bugs anywhere, scaffold a project): these get suggested per-area subtasks and a repository map instead of code |
+
+A config owns the directory it is in: sources there that it does not include (for example `.js` files in a TypeScript project without `allowJs`, or scripts outside `include`) are not searched. Sources under no config at all, such as a front end next to an `e2e/tsconfig.json`, are searched and analysed without one. Directories named `node_modules`, `dist`, `build`, `coverage` and `.next`, and source files over 1 MiB, are skipped.
+
 ## CLI
 
 ```bash
@@ -24,6 +39,7 @@ The CLI emits structured JSON. Once the package is published, `jevtrace` replace
 - `query` with only `--task` runs the task-only pipeline: discovery, compiler expansion, and budgeted context selection (see [architecture](architecture.md)).
 - `discover` runs discovery only and returns leads without expanding context.
 - `--file`/`--line`, `--file`/`--symbol`, or `--evidence` start from a known entry and use the explicit-entry retriever instead of discovery.
+- `--no-scope-check` retrieves even when the task reads as project-wide (see [Broad tasks](#broad-tasks)).
 - `--offline` needs no provider. For task-only queries it uses the lexical branch as leads, compiler shallow expansion, and structural budget cutting. Explicit file/line queries keep the include-all compiler baseline.
 
 ### From jevgrep leads
@@ -66,6 +82,8 @@ AI_GATEWAY_API_KEY=... node dist/cli.js query ... --provider vercel
 OPENCODE_API_KEY=... node dist/cli.js query ... --provider opencode
 ```
 
+Other decision APIs can be added as providers without touching retrieval; see [Adding a decision provider](architecture.md#adding-a-decision-provider).
+
 Other settings: `JEVTRACE_JEV_BATCH_SIZE` sets the local provider batch cap (default 16). Legacy `JEVTRACE_JUDGE=openrouter-jev|jev|include-all` is still accepted.
 
 ## MCP server
@@ -86,6 +104,32 @@ Running the CLI without `query` or `discover` starts a stdio MCP server for the 
 
 This repository's `.vscode/mcp.json` runs the server against the checkout itself, reading credentials from `.env`.
 
+### Claude Code
+
+Register once for all your projects. Without `--root`, the server searches the project Claude Code is working in (it reads `CLAUDE_PROJECT_DIR`, which Claude Code sets for MCP servers; user-scope servers otherwise start in `~/.claude`). `--env-file` lets Node read the key from a `.env` file instead of storing it in Claude Code's configuration:
+
+```bash
+claude mcp add jevtrace --scope user -- node --env-file=/absolute/JevTrace/.env /absolute/JevTrace/dist/cli.js
+```
+
+Check the connection with `claude mcp list` or `/mcp` inside Claude Code, then ask for context, for example "Use jevtrace to find the code that decides retry delays". Pass `--root /absolute/project` after `cli.js` to pin one repository instead.
+
+### Usage log and `stats`
+
+Every MCP tool call is appended to `~/.jevtrace/usage.jsonl`: time, tool, project, task, outcome, time taken, tokens sent and excluded, and Jev requests, input tokens and cost. It stays on your machine. Set `JEVTRACE_USAGE_LOG=off` to disable it or to a path to move it.
+
+```bash
+node /absolute/JevTrace/dist/cli.js stats --days 7
+```
+
+To see what the agent itself receives for a task (Claude Code shows the model the structured result, which carries the same bounded context as the text), run:
+
+```bash
+node --env-file=.env scripts/agent-view.mjs /absolute/project "Describe the change you want"
+```
+
+`stats` summarizes those calls and also scans Claude Code's session transcripts (`~/.claude/projects`, or `CLAUDE_CONFIG_DIR`) to show how many sessions called JevTrace and how many searched only with Grep, Glob or Read, which is how you can tell when the agent did not use it.
+
 ### Tools
 
 `retrieve_dependency_context` is the primary **task-only** tool. It accepts a natural-language coding task and always runs repository discovery before compiler expansion and final budget selection. It intentionally does not accept `file` or `line`, so an agent cannot silently bypass discovery by inventing an entry location.
@@ -99,6 +143,15 @@ This repository's `.vscode/mcp.json` runs the server against the checkout itself
 Discovery and task-only retrieval accept `maxCandidates` (default 64), `maxLeads` (default 4), `maxFiles` (default 3000), `maxRelevantDirectories` (default 8), `maxJevFiles` (default 256 after directory selection), and `maxRelevantFiles` (default 8). Lexical hints are visible to Jev but never restrict the semantic search space. Semantic thresholds remain provisional.
 
 For task-only retrieval, `tokenBudget` (default 8000 estimated tokens) is the final context budget. `perLeadNodeLimit` (default 24), `perLeadTokenBudget` (defaults to the final budget), `reverseFanIn` (default 12), and `neighborhoodTokenBudget` (default twice the final budget) bound compiler expansion before remote context ranking. Lexical candidates guide discovery but are not merged into the final pool unless enabled (`--lexical-final-merge` in the CLI, `includeLexicalParallel=true` over MCP). `contextRanking=jev` calls Stage 4 only when the final pool exceeds `tokenBudget`; `contextRanking=structural` disables Stage 4.
+
+### Broad tasks
+
+Before returning code, `retrieve_dependency_context` asks Jev whether the task names one behaviour or area (in parallel with discovery, so specific tasks are not slowed down). When it does not ("find critical bugs", "review the whole project", "이 프로젝트의 기본적인 틀을 짜줘"), the result has `status: "broad"`, the `specificity` score, and instead of code:
+
+- **Suggested subtasks**: the task restricted to each area of the repository, for example `Find critical bugs in this project — only in src/router/ (LinearRouter, Route, PatternRouter)`. Areas come from splitting the largest directory first (up to 16 areas), so a large `src/` is split before small top-level folders are. Each line passes the scope check on its own and can be passed back as the task, one call per area.
+- **A repository map**: each directory with its source-file count and top-level declarations, merged into parent directories to fit `maxChars`.
+
+The server instructions also tell agents that split a larger request to call JevTrace once per subtask, including from subagents. Pass `scopeCheck: false` to retrieve for the exact wording anyway. The check costs one small Jev request, which is counted in the usage log.
 
 Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, reverse, wrapper-lookahead, and visit-policy controls.
 

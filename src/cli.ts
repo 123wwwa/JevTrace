@@ -7,14 +7,28 @@ import { TypeScriptAdapter } from './typescript-adapter.js';
 import { createJudge, IncludeAllJudge } from './judges.js';
 import type { JevProvider } from './judges.js';
 import { query } from './query.js';
-import { RepositoryIndex, discoverEntries } from './discovery.js';
+import { RepositoryIndex, defaultMaxFiles, discoverEntries } from './discovery.js';
+import { formatStats } from './stats.js';
+
+if (process.argv[2] === 'stats') {
+  const daysArgument = process.argv.indexOf('--days');
+  const days = daysArgument >= 0 ? Number(process.argv[daysArgument + 1]) : 7;
+  if (!Number.isFinite(days) || days <= 0) {
+    process.stderr.write('Usage: jevtrace stats [--days N]\n');
+    process.exit(1);
+  }
+  process.stdout.write(formatStats(days) + '\n');
+  process.exit(0);
+}
 
 const rootArgument = process.argv.indexOf('--root');
 if (rootArgument >= 0 && !process.argv[rootArgument + 1]) {
   process.stderr.write('Usage: jevtrace [--root /path/to/project]\n');
   process.exit(1);
 }
-const root = rootArgument >= 0 ? path.resolve(process.argv[rootArgument + 1]) : process.cwd();
+// Without --root, follow the host's project: Claude Code passes it as CLAUDE_PROJECT_DIR and starts
+// user-scope servers from its own configuration directory, so the working directory is not the project.
+const root = path.resolve(rootArgument >= 0 ? process.argv[rootArgument + 1] : process.env.CLAUDE_PROJECT_DIR || process.cwd());
 // Fail at startup with the reason on stderr (which MCP hosts show in their logs), not at the first request.
 if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
   process.stderr.write(`jevtrace: project root is not a directory: ${root}\n`);
@@ -50,7 +64,7 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
     const discoveryOptions = {
       maxCandidates: Number(argument('--max-candidates') ?? 64),
       maxLeads: Number(argument('--max-leads') ?? 4),
-      maxFiles: Number(argument('--max-files') ?? 3000),
+      maxFiles: Number(argument('--max-files') ?? defaultMaxFiles),
       maxJevFiles: Number(argument('--max-jev-files') ?? 256),
       maxRelevantDirectories: Number(argument('--max-relevant-directories') ?? 8),
       maxRelevantFiles: Number(argument('--max-relevant-files') ?? 8),
@@ -69,6 +83,7 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
         lexicalMergeLimit: Number(argument('--lexical-merge-limit') ?? 64),
         includeLexicalParallel: process.argv.includes('--lexical-final-merge') || process.argv.includes('--include-lexical-parallel'),
         contextRanking: argument('--context-ranking') === 'structural' ? 'structural' : 'jev',
+        scopeCheck: !process.argv.includes('--no-scope-check'),
         wrapperLookahead: !process.argv.includes('--no-wrapper-lookahead'), visitPolicy: argument('--visit-policy') === 'choice' ? 'choice' : 'score' });
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {

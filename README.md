@@ -3,7 +3,7 @@
 <a href="docs/benchmark-vs-jevgrep.md">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/benchmark-vs-jevgrep-dark.svg">
-    <img alt="JevTrace vs jevgrep on 19 JS/TS tasks: 89.5% vs 70.6% of required code delivered, 6.1× lower Jev cost, 2.8× faster search, 41% fewer tokens handed to the agent" src="assets/benchmark-vs-jevgrep-light.svg" width="960">
+    <img alt="JevTrace vs jevgrep on 19 JS/TS tasks: 98.2% vs 70.6% of required code delivered, 5.9× lower Jev cost, 3.0× faster search, 53% fewer tokens handed to the agent" src="assets/benchmark-vs-jevgrep-light.svg" width="960">
   </picture>
 </a>
 
@@ -22,7 +22,13 @@ export OPENROUTER_API_KEY=your-key   # or add --offline to run without a provide
 node dist/cli.js query --root /path/to/your/project --task "Fix refresh token validation"
 ```
 
-As an MCP server, register `node /path/to/JevTrace/dist/cli.js --root /path/to/your/project` (stdio, with `OPENROUTER_API_KEY` set) and call `retrieve_dependency_context` with your task.
+In Claude Code (searches whichever project you open; key read from JevTrace's `.env`):
+
+```bash
+claude mcp add jevtrace --scope user -- node --env-file=/path/to/JevTrace/.env /path/to/JevTrace/dist/cli.js
+```
+
+Ask about one behaviour or area of an existing TS/JS codebase ("where is X decided, what else touches it"). Project-wide requests such as "find bugs" or "review everything" get per-area subtasks to call it with instead of code. Supports `.ts/.tsx/.js/.jsx/.mjs/.cjs` and Vue components, ES modules and CommonJS, with or without a tsconfig/jsconfig, up to 20,000 source files; not Svelte/Astro — see [supported projects](docs/usage.md#supported-projects).
 
 ## Docs
 

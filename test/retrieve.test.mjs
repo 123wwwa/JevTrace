@@ -520,7 +520,8 @@ test('resolves tsconfig path aliases and typed property method calls', () => {
   const alias = adapter.findEntry({ file: 'src/alias.ts', line: 4 });
   assert.equal(adapter.dependencies(alias).edges[0].target.name, 'verifyToken');
   const method = adapter.findEntry({ file: 'src/method.ts', line: 7 });
-  const edge = adapter.dependencies(method).edges.find(candidate => candidate.target.name === 'find');
+  // Class members are named `Class.member`, the same form discovery and the benchmark labels use.
+  const edge = adapter.dependencies(method).edges.find(candidate => candidate.target.name === 'UserRepo.find');
   assert.equal(edge?.kind, 'method');
   assert.equal(edge?.target.file, 'src/method.ts');
 });

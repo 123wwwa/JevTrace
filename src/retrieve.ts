@@ -44,7 +44,10 @@ export interface RetrievalResult {
   reversePruned: number;
   judgeRounds: number;
   judgeTrace: JudgeRoundTrace[];
+  /** Problems that degraded this result. */
   warnings: string[];
+  /** Normal bounds and static-analysis limits, reported for inspection. */
+  notes?: string[];
 }
 export interface RetrievalOptions { maxDepth?: number; maxNodes?: number; tokenBudget?: number; reverse?: boolean; reverseFanIn?: number; wrapperLookahead?: boolean; visitPolicy?: 'score' | 'choice'; bodyThreshold?: number; omitThreshold?: number; signal?: AbortSignal }
 interface Queued { candidate: Candidate; score: number; path: string[]; wrapper: boolean; priority: number }
@@ -247,24 +250,52 @@ export async function retrieve(adapter: LanguageAdapter, judge: RelevanceJudge, 
   return { task, judge: judge.name, status: incomplete ? 'incomplete' : 'complete', entry, items, omitted, unresolved, considered, usedTokens, tokenBudget, visitPolicy, choiceDecisions, wrapperLookahead, bodyThreshold, omitThreshold, reverseFanIn, reversePruned, judgeRounds, judgeTrace, warnings };
 }
 
+/**
+ * Renders the context for the agent within maxChars. Code blocks are never cut in the middle: blocks are
+ * added in ranking order while they fit, and the ones that do not are listed by location instead (a
+ * mid-block cut used to drop the tail of the ranking silently, including needed callers and types).
+ */
 export function formatContext(result: RetrievalResult, maxChars = 30000): string {
-  const lines = [
-    `Status: ${result.status} | Judge: ${result.judge} | Visit: ${result.visitPolicy} | Judge rounds: ${result.judgeRounds} | Thresholds: body>${result.bodyThreshold}, omit<${result.omitThreshold} | Context: ~${result.usedTokens}/${result.tokenBudget} tokens`,
-    `Task: ${result.task}`,
-    `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
-    `Included: ${result.items.length} | Omitted: ${result.omitted.length} | Unresolved: ${result.unresolved.length}`,
-    ...result.warnings.map(w => `Warning: ${w}`), '', '## Paths',
-    ...result.items.map(item => `- ${item.path.join(' → ')} (${item.kind ?? 'entry'}; ${item.level}; ${item.node.file}:${item.node.startLine})`),
-    '', '## Context',
-  ];
-  for (const item of result.items) {
-    lines.push(`### ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine} [${item.level}${item.score === undefined ? '' : `; relevance ${item.score.toFixed(2)}`}]
+  const listed = 8;
+  const relation = (item: ContextItem) => item.kind && item.path.length > 1 ? `; ${item.kind} of ${item.path[0]}` : item.kind ? `; ${item.kind}` : '';
+  const block = (item: ContextItem) => `### ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine} [${item.level}${relation(item)}${item.score === undefined ? '' : `; relevance ${item.score.toFixed(2)}`}]
 \`\`\`ts
 ${item.level === 'body' ? item.node.source : item.node.signature}
-\`\`\``);
+\`\`\``;
+  const location = (item: ContextItem) => `- ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine}`;
+  const footer = (notShown: ContextItem[]) => {
+    const lines: string[] = [];
+    if (notShown.length) lines.push('', '## Not shown (output limit; read these directly if needed)', ...notShown.map(location));
+    if (result.omitted.length) lines.push('', '## Omitted (over the token budget)', ...result.omitted.slice(0, listed).map(location),
+      ...(result.omitted.length > listed ? [`- … and ${result.omitted.length - listed} more`] : []));
+    if (result.unresolved.length) lines.push('', '## Not followed (dynamic or external references)', ...result.unresolved.slice(0, listed).map(item => `- ${item.site.file}:${item.site.line} ${item.expression}`),
+      ...(result.unresolved.length > listed ? [`- … and ${result.unresolved.length - listed} more`] : []));
+    return lines.join('\n');
+  };
+
+  const blocks = result.items.map(block);
+  const shown: number[] = [];
+  const header = (count: number) => {
+    const items = shown.map(index => result.items[index]);
+    const signatures = items.filter(item => item.level === 'signature').length;
+    return [
+      `Status: ${result.status} | Context: ${count} of ${result.items.length} symbols shown${signatures ? ` (${signatures} as signatures)` : ''}, ~${result.usedTokens}/${result.tokenBudget} tokens selected`,
+      `Task: ${result.task}`,
+      `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
+      ...result.warnings.map(w => `Warning: ${w}`),
+      ...(result.notes?.length ? [`Notes: ${result.notes.join('; ')}`] : []),
+      '', '## Context',
+    ].join('\n');
+  };
+  // Reserve room for the header and for listing every block that might not fit.
+  const reserve = header(result.items.length).length + footer(result.items).length + 2;
+  let used = reserve;
+  for (const [index, text] of blocks.entries()) {
+    if (used + text.length + 1 > maxChars) continue;
+    shown.push(index);
+    used += text.length + 1;
   }
-  lines.push('', '## Omitted', ...result.omitted.map(item => `- ${item.node.name} — ${item.node.file}:${item.node.startLine} (relevance ${item.score?.toFixed(2) ?? 'n/a'})`));
-  lines.push('', '## Unresolved', ...result.unresolved.map(item => `- ${item.site.file}:${item.site.line} ${item.expression} — ${item.reason}`));
-  const text = lines.join('\n');
+  const notShown = result.items.filter((_, index) => !shown.includes(index));
+  const text = [header(shown.length), ...shown.map(index => blocks[index]), footer(notShown)].join('\n');
   return text.length > maxChars ? text.slice(0, maxChars - 35) + '\n[Output character limit reached]' : text;
 }

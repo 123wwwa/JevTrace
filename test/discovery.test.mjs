@@ -1,3 +1,5 @@
+// Tests must never write to the real usage log in the home directory.
+process.env.JEVTRACE_USAGE_LOG = 'off';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';

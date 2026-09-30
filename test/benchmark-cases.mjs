@@ -20,7 +20,7 @@ export const benchmarkCases = [
     gold: [
       { file: 'src/bench/cache-helpers.ts', name: 'sessionKeys', requiredLevel: 'body' },
       { file: 'src/bench/cache-helpers.ts', name: 'normalizeUserId', requiredLevel: 'body' },
-      { file: 'src/bench/cache-helpers.ts', name: 'deleteMany', requiredLevel: 'body' },
+      { file: 'src/bench/cache-helpers.ts', name: 'CacheStore.deleteMany', requiredLevel: 'body' },
     ],
   },
   {
@@ -42,7 +42,7 @@ export const benchmarkCases = [
     task: 'Fix authorization so inherited role permissions are expanded before checking the requested action',
     entry: { file: 'src/bench/permission-entry.ts', line: 7 },
     gold: [
-      { file: 'src/bench/permission-helpers.ts', name: 'findForUser', requiredLevel: 'body' },
+      { file: 'src/bench/permission-helpers.ts', name: 'PermissionRepository.findForUser', requiredLevel: 'body' },
       { file: 'src/bench/permission-helpers.ts', name: 'expandRoles', requiredLevel: 'body' },
       { file: 'src/bench/permission-helpers.ts', name: 'hasPermission', requiredLevel: 'body' },
     ],
@@ -54,7 +54,7 @@ export const benchmarkCases = [
     entry: { file: 'src/bench/message-entry.ts', line: 5 },
     gold: [
       { file: 'src/bench/message-helpers.ts', name: 'MessageParser', requiredLevel: 'body' },
-      { file: 'src/bench/message-helpers.ts', name: 'parse', requiredLevel: 'body' },
+      { file: 'src/bench/message-helpers.ts', name: 'MessageParser.parse', requiredLevel: 'body' },
       { file: 'src/bench/message-helpers.ts', name: 'transformMessage', requiredLevel: 'body' },
       { file: 'src/bench/message-helpers.ts', name: 'sanitizePayload', requiredLevel: 'body' },
       { file: 'src/bench/message-helpers.ts', name: 'publishResult', requiredLevel: 'body' },
@@ -92,7 +92,7 @@ export const benchmarkCases = [
     entry: { file: 'src/bench/search-entry.ts', line: 7 },
     gold: [
       { file: 'src/bench/search-helpers.ts', name: 'normalizeQuery', requiredLevel: 'body' },
-      { file: 'src/bench/search-helpers.ts', name: 'search', requiredLevel: 'body' },
+      { file: 'src/bench/search-helpers.ts', name: 'ProductRepository.search', requiredLevel: 'body' },
       { file: 'src/bench/search-helpers.ts', name: 'scoreProduct', requiredLevel: 'body' },
       { file: 'src/bench/search-helpers.ts', name: 'rankResults', requiredLevel: 'body' },
     ],

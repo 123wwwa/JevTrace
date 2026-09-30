@@ -1,4 +1,4 @@
-export type EdgeKind = 'import' | 'call' | 'new' | 'method' | 'jsx' | 'type' | 'caller' | 'test' | 'lexical';
+export type EdgeKind = 'import' | 'call' | 'new' | 'method' | 'jsx' | 'type' | 'value' | 'sibling' | 'caller' | 'test' | 'lexical';
 export type ContextLevel = 'body' | 'signature' | 'omitted';
 
 export interface SourceLocation { file: string; line: number; endLine?: number; text?: string }
@@ -13,6 +13,8 @@ export interface CodeNode {
   source: string;
   signature: string;
   external?: boolean;
+  /** The signature is a member outline (classes): usable in place of a large body. */
+  outline?: boolean;
 }
 
 export interface Dependency {
@@ -35,7 +37,8 @@ export interface SupportingContext {
 export interface LanguageAdapter {
   readonly language: string;
   findEntry(input: EntryInput): CodeNode;
-  dependencies(node: CodeNode): DependencyScan;
+  /** `values` also follows references to module-level constants (configuration objects, tables). */
+  dependencies(node: CodeNode, options?: { values?: boolean }): DependencyScan;
   reverseDependencies(node: CodeNode): DependencyScan;
   supportingContext?(node: CodeNode): SupportingContext[];
 }
@@ -62,6 +65,9 @@ export interface ProviderBatchStats {
   attempts: number;
   /** Answers that were missing or outside [0, 1]; those candidates are left undecided instead of failing the batch. */
   invalidAnswers?: number;
+  /** Provider-reported input tokens and USD cost for this batch, when the provider returns them. */
+  inputTokens?: number;
+  cost?: number;
 }
 
 export interface JudgeCallStats {
@@ -86,4 +92,12 @@ export interface RelevanceJudge {
   judgeWithStats?(task: string, entry: CodeNode, candidates: Candidate[], signal?: AbortSignal): Promise<JudgeCallResult>;
   rankContext?(task: string, candidates: Candidate[], signal?: AbortSignal): Promise<JudgeCallResult>;
   chooseNext?(task: string, entry: CodeNode, candidates: Candidate[], signal?: AbortSignal): Promise<string>;
+  /** Probability that the task names one behaviour or area a search can locate, rather than the whole project. */
+  judgeTaskScope?(task: string, signal?: AbortSignal): Promise<TaskScopeJudgment>;
+}
+
+export interface TaskScopeJudgment {
+  /** Missing when the provider gave no valid answer. */
+  specificity?: number;
+  stats: JudgeCallStats;
 }

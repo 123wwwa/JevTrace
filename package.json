@@ -2,14 +2,34 @@
   "name": "jevtrace",
   "version": "0.1.0",
   "description": "Dependency-aware JS/TS context retrieval for coding agents",
-  "keywords": ["mcp", "typescript", "javascript", "code-context", "coding-agent", "retrieval"],
-  "repository": { "type": "git", "url": "git+https://github.com/123wwwa/JevTrace.git" },
+  "keywords": [
+    "mcp",
+    "typescript",
+    "javascript",
+    "code-context",
+    "coding-agent",
+    "retrieval"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/123wwwa/JevTrace.git"
+  },
   "homepage": "https://github.com/123wwwa/JevTrace#readme",
-  "bugs": { "url": "https://github.com/123wwwa/JevTrace/issues" },
+  "bugs": {
+    "url": "https://github.com/123wwwa/JevTrace/issues"
+  },
   "type": "module",
-  "bin": { "jevtrace": "./dist/cli.js" },
-  "files": ["dist", "README.md", "docs"],
-  "engines": { "node": ">=20" },
+  "bin": {
+    "jevtrace": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui.json && vite build",
     "prepack": "npm run build",
@@ -31,6 +51,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.3",
     "@modelcontextprotocol/server": "^2.0.0",
+    "@vue/compiler-sfc": "^3.5.43",
     "typescript": "^6.0.0",
     "zod": "^4.2.0"
   },
