@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -45,7 +46,15 @@ interface SearchFields {
 }
 
 const testFile = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
-type ScanResult ={ nodes: CodeNode[]; scannedFiles: number; warnings: string[] };
+/** `unanalysedFiles`: sources inside a config's directory that it neither includes nor imports, minus git-ignored ones. */
+type ScanResult = { nodes: CodeNode[]; scannedFiles: number; warnings: string[]; unanalysedFiles: string[] };
+/** At most this many unanalysed files are listed; they are shown by path only. */
+const maxUnanalysedFiles = 2000;
+/**
+ * A directory JevTrace does not analyse must beat every analysed one by at least this much before a task is
+ * answered as not covered; closer calls still search the analysed code and only mention the other.
+ */
+const notCoveredMargin = 0.2;
 /** A lead that overlaps an earlier one still wins a slot over a diverse lead scored more than this below it. */
 const diversityMargin = 0.1;
 /** A directory scope is split into child scopes once its subtree holds more files than this. */
@@ -103,10 +112,27 @@ export interface FileLead {
   symbols: string[];
 }
 
+/** A directory of sources JevTrace does not analyse that Jev judged relevant to the task. */
+export interface UnanalysedLead {
+  directory: string;
+  score: number;
+  files: string[];
+}
+
+/** "web/ (web/app.js, web/worker.js, +3 more)": what to search directly. */
+export function describeUnanalysed(leads: UnanalysedLead[], filesPerDirectory = 6): string {
+  return leads.map(lead => {
+    const shown = lead.files.slice(0, filesPerDirectory).join(', ');
+    const more = lead.files.length > filesPerDirectory ? `, +${lead.files.length - filesPerDirectory} more` : '';
+    return `${lead.directory === '.' ? '(root)' : `${lead.directory}/`} (${shown}${more})`;
+  }).join('; ');
+}
+
 export interface DiscoveryResult {
   task: string;
   mode: 'parallel-jev' | 'lexical';
-  status: 'complete' | 'incomplete' | 'no-match';
+  /** not-covered: the task is about sources JevTrace does not analyse (see unanalysedLeads); nothing else was judged. */
+  status: 'complete' | 'incomplete' | 'no-match' | 'not-covered';
   lexicalCandidates: EntryLead[];
   localCandidates: EntryLead[];
   directoryLeads: DirectoryLead[];
@@ -126,6 +152,8 @@ export interface DiscoveryResult {
   symbolJudgeStats: JudgeCallStats;
   stageLatencyMs: { directory: number; file: number; symbol: number };
   warnings: string[];
+  /** Directories outside the analysed project that Jev judged relevant, strongest first. */
+  unanalysedLeads: UnanalysedLead[];
 }
 
 function buildTree(files: string[]): string {
@@ -149,12 +177,56 @@ function buildTree(files: string[]): string {
   return lines.join('\n');
 }
 
+/**
+ * Adaptive scopes: a directory stays one scope while its subtree is small; larger subtrees are split into
+ * their child directories (direct files keep a scope of their own). Fixed-depth buckets could put thousands
+ * of files behind one decision, or split a small repository into needless scopes.
+ */
+function directoryScopes(allFiles: string[], splitRoot = false): { buckets: Map<string, string[]>; directOnly: Set<string> } {
+  const buckets = new Map<string, string[]>();
+  const directOnly = new Set<string>();
+  const split = (directory: string, files: string[]): void => {
+    if (splitRoot && directory === '.') {
+      // Always one scope per top-level directory, however few files there are.
+      const own = files.filter(file => !file.includes('/'));
+      if (own.length) buckets.set('.', own);
+      const tops = new Map<string, string[]>();
+      for (const file of files) if (file.includes('/')) {
+        const top = file.slice(0, file.indexOf('/'));
+        tops.set(top, [...(tops.get(top) ?? []), file]);
+      }
+      for (const [top, topFiles] of tops) split(top, topFiles);
+      return;
+    }
+    const prefix = directory === '.' ? '' : `${directory}/`;
+    const own: string[] = [];
+    const children = new Map<string, string[]>();
+    for (const file of files) {
+      const rest = file.slice(prefix.length);
+      const slash = rest.indexOf('/');
+      if (slash < 0) { own.push(file); continue; }
+      const child = prefix + rest.slice(0, slash);
+      const childFiles = children.get(child) ?? [];
+      childFiles.push(file);
+      children.set(child, childFiles);
+    }
+    if (files.length <= maxScopeFiles || !children.size) {
+      buckets.set(directory, files);
+      return;
+    }
+    if (own.length) { buckets.set(directory, own); directOnly.add(directory); }
+    for (const [child, childFiles] of children) split(child, childFiles);
+  };
+  if (allFiles.length) split('.', allFiles);
+  return { buckets, directOnly };
+}
+
 /** Lightweight compiler AST inventory. Type checking is deferred until graph resolution. */
 export class RepositoryIndex {
   private cache = new Map<string, { version: string; nodes: CodeNode[]; fields: Map<string, SearchFields> }>();
   constructor(readonly root: string) {}
 
-  scan(maxFiles: number, signal?: AbortSignal): { nodes: CodeNode[]; scannedFiles: number; warnings: string[] } {
+  scan(maxFiles: number, signal?: AbortSignal): ScanResult {
     const nodes: CodeNode[] = [];
     const warnings: string[] = [];
     const seen = new Set<string>();
@@ -170,6 +242,7 @@ export class RepositoryIndex {
 
     let scannedFiles = 0;
     let limitReached: string | undefined;
+    const unanalysed: string[] = [];
     const walk = (directory: string): void => {
       signal?.throwIfAborted();
       for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -182,8 +255,14 @@ export class RepositoryIndex {
         if (entry.isDirectory() && !ignored.has(entry.name) && !entry.name.startsWith('.')) {
           walk(full);
         } else if (entry.isFile() && sourceFile.test(entry.name) && !declarationFile.test(entry.name)) {
-          // Only files a project includes count toward the limit; excluded ones are never indexed.
-          if (excluded(path.resolve(full))) continue;
+          // Only files a project includes count toward the limit; excluded ones are never indexed, only listed.
+          if (excluded(path.resolve(full))) {
+            // Only directories count: files directly in the root are mostly tool configs (vite.config.ts,
+            // eslint.config.js), which would otherwise add a directory decision to almost every repository.
+            const relative = path.relative(this.root, full).replaceAll('\\', '/');
+            if (relative.includes('/') && unanalysed.length < maxUnanalysedFiles) unanalysed.push(relative);
+            continue;
+          }
           scannedFiles++;
           const stat = fs.statSync(full, { bigint: true });
           if (stat.size > 1024n * 1024n) {
@@ -273,7 +352,27 @@ export class RepositoryIndex {
     walk(root);
     if (limitReached) warnings.push(`Discovery file limit reached (${maxFiles} source files): ${limitReached} and later paths (in name order) were not searched; raise maxFiles to search them`);
     for (const file of this.cache.keys()) if (!seen.has(file)) this.cache.delete(file);
-    return { nodes, scannedFiles, warnings: unique(warnings) };
+    return { nodes, scannedFiles, warnings: unique(warnings), unanalysedFiles: this.withoutIgnored(unanalysed) };
+  }
+
+  private ignoredCache?: { key: string; kept: string[] };
+
+  /**
+   * Drops git-ignored paths (build copies, generated fixtures, local results) so only sources kept in the
+   * repository are reported. Without git, or outside a repository, every path is kept.
+   */
+  private withoutIgnored(files: string[]): string[] {
+    if (!files.length) return files;
+    let gitignore = '';
+    try { gitignore = String(fs.statSync(path.join(this.root, '.gitignore')).mtimeMs); } catch { /* none */ }
+    const key = `${gitignore}\0${files.join('\0')}`;
+    if (this.ignoredCache?.key === key) return this.ignoredCache.kept;
+    const result = spawnSync('git', ['check-ignore', '--stdin', '-z'], { cwd: this.root, input: files.join('\0'), encoding: 'utf8', timeout: 5000, windowsHide: true });
+    // Exit 0: some paths are ignored; 1: none are; anything else (no git, not a repository): keep them all.
+    const ignoredPaths = result.status === 0 ? new Set(result.stdout.split('\0').filter(Boolean)) : new Set<string>();
+    const kept = files.filter(file => !ignoredPaths.has(file));
+    this.ignoredCache = { key, kept };
+    return kept;
   }
 
   /** Type-level declarations (interfaces, type aliases, enums, member-less classes) carry no lexical fields. */
@@ -370,33 +469,7 @@ export class RepositoryIndex {
       .sort();
     for (const file of allFiles) if (!byFile.has(file)) byFile.set(file, []);
 
-    // Adaptive scopes: a directory stays one scope while its subtree is small; larger subtrees are split
-    // into their child directories (direct files keep a scope of their own). Fixed-depth buckets could
-    // put thousands of files behind one decision, or split a small repository into needless scopes.
-    const directoryBuckets = new Map<string, string[]>();
-    const directOnly = new Set<string>();
-    const split = (directory: string, files: string[]): void => {
-      const prefix = directory === '.' ? '' : `${directory}/`;
-      const own: string[] = [];
-      const children = new Map<string, string[]>();
-      for (const file of files) {
-        const rest = file.slice(prefix.length);
-        const slash = rest.indexOf('/');
-        if (slash < 0) { own.push(file); continue; }
-        const child = prefix + rest.slice(0, slash);
-        const childFiles = children.get(child) ?? [];
-        childFiles.push(file);
-        children.set(child, childFiles);
-      }
-      if (files.length <= maxScopeFiles || !children.size) {
-        directoryBuckets.set(directory, files);
-        return;
-      }
-      if (own.length) { directoryBuckets.set(directory, own); directOnly.add(directory); }
-      for (const [child, childFiles] of children) split(child, childFiles);
-    };
-    if (allFiles.length) split('.', allFiles);
-
+    const { buckets: directoryBuckets, directOnly } = directoryScopes(allFiles);
     const directoryNodes: CodeNode[] = [...directoryBuckets.entries()].map(([directory, files]) => ({
       id: `dir::${directory}`,
       name: directory,
@@ -404,6 +477,19 @@ export class RepositoryIndex {
       startLine: 1,
       endLine: 1,
       signature: directOnly.has(directory) ? `Repository directory ${directory} (direct files only; subdirectories are separate scopes)` : `Repository directory ${directory}`,
+      source: `Files in ${directory}:\n${files.slice(0, 120).join('\n')}`,
+    }));
+    // Scored in the same directory pass, so a task about code JevTrace does not analyse is recognised
+    // before any file or symbol is judged.
+    // Grouped per top-level directory at least: "web/" and "test/" call for different searches.
+    const unanalysed = directoryScopes(inventory.unanalysedFiles, true);
+    const unanalysedNodes: CodeNode[] = [...unanalysed.buckets.entries()].map(([directory, files]) => ({
+      id: `dir::unanalysed::${directory}`,
+      name: directory,
+      file: directory,
+      startLine: 1,
+      endLine: 1,
+      signature: `Repository directory ${directory}${unanalysed.directOnly.has(directory) ? ' (direct files only)' : ''}: sources outside the analysed TypeScript project`,
       source: `Files in ${directory}:\n${files.slice(0, 120).join('\n')}`,
     }));
 
@@ -423,9 +509,11 @@ export class RepositoryIndex {
 
     return {
       ...inventory,
-      tree: buildTree(allFiles),
+      tree: buildTree([...allFiles, ...inventory.unanalysedFiles]),
       directoryNodes,
       filesByDirectory: directoryBuckets,
+      unanalysedNodes,
+      unanalysedByDirectory: unanalysed.buckets,
       makeFileNode,
       symbolsByFile: byFile,
       totalFiles: allFiles.length,
@@ -528,6 +616,7 @@ export async function discoverEntries(
       symbolJudgeStats: emptyStats,
       stageLatencyMs: { directory: 0, file: 0, symbol: 0 },
       warnings,
+      unanalysedLeads: [],
     };
   };
 
@@ -561,14 +650,18 @@ export async function discoverEntries(
     let directoryLatencyMs = 0;
     let directoryJudgeStats: JudgeCallStats = emptyStats;
     let directoryScores: DirectoryLead[] = [];
-    if (fileInventory.directoryNodes.length === 1) {
+    let unanalysedLeads: UnanalysedLead[] = [];
+    let directoryJudged = false;
+    const scopeNodes = [...fileInventory.directoryNodes, ...fileInventory.unanalysedNodes];
+    if (scopeNodes.length === 1 && fileInventory.directoryNodes.length === 1) {
       const onlyDirectory = fileInventory.directoryNodes[0];
       directoryScores = [{ directory: onlyDirectory.file, score: 1 }];
-    } else if (fileInventory.directoryNodes.length > 1) {
+    } else if (scopeNodes.length) {
+      directoryJudged = true;
       const directoryStarted = performance.now();
       const directoryJudgments = await callJudge('directory stage', options.signal, () => judge.judgeFiles!(
         task,
-        fileInventory.directoryNodes,
+        scopeNodes,
         { tree: fileInventory.tree, lexicalHints: lexicalHintNodes },
         options.signal,
       ));
@@ -577,7 +670,40 @@ export async function discoverEntries(
       directoryScores = fileInventory.directoryNodes
         .map(directoryNode => ({ directory: directoryNode.file, score: scoreOf(directoryJudgments.decisions, directoryNode.id) }))
         .sort((a, b) => b.score - a.score || a.directory.localeCompare(b.directory));
+      unanalysedLeads = fileInventory.unanalysedNodes
+        .map(node => ({ directory: node.file, score: scoreOf(directoryJudgments.decisions, node.id), files: fileInventory.unanalysedByDirectory.get(node.file) ?? [] }))
+        .filter(lead => lead.score >= minFileScore)
+        .sort((a, b) => b.score - a.score || a.directory.localeCompare(b.directory));
     }
+    // The task is about code JevTrace cannot trace: say so now instead of judging files and symbols that
+    // would only yield the nearest analysed code.
+    const bestAnalysed = directoryScores[0]?.score ?? 0;
+    if (unanalysedLeads.length && unanalysedLeads[0].score - bestAnalysed >= notCoveredMargin) {
+      return {
+        task,
+        mode: 'parallel-jev',
+        status: 'not-covered',
+        lexicalCandidates,
+        localCandidates: lexicalCandidates,
+        directoryLeads: directoryScores,
+        fileLeads: [],
+        rescuedFiles: [],
+        leads: [],
+        semanticLeads: [],
+        scannedFiles: lexical.scannedFiles,
+        declarations: lexical.nodes.length,
+        judgedCandidates: scopeNodes.length,
+        latencyMs: performance.now() - started,
+        judgeStats: directoryJudgeStats,
+        directoryJudgeStats,
+        fileJudgeStats: emptyStats,
+        symbolJudgeStats: emptyStats,
+        stageLatencyMs: { directory: directoryLatencyMs, file: 0, symbol: 0 },
+        warnings,
+        unanalysedLeads,
+      };
+    }
+    if (unanalysedLeads.length) warnings.push(`Also relevant, not analysed by JevTrace (outside the TypeScript project; search these directly): ${describeUnanalysed(unanalysedLeads)}`);
     const selectedDirectories = directoryScores.filter(item => item.score >= minFileScore).slice(0, maxRelevantDirectories);
 
     // Lexically stronger files come first inside each scope, so the maxJevFiles cap drops the weakest
@@ -733,7 +859,7 @@ export async function discoverEntries(
       selected,
       scannedFiles: lexical.scannedFiles,
       declarations: lexical.nodes.length,
-      judgedCandidates: (fileInventory.directoryNodes.length > 1 ? fileInventory.directoryNodes.length : 0) + fileNodes.length + symbols.length,
+      judgedCandidates: (directoryJudged ? scopeNodes.length : 0) + fileNodes.length + symbols.length,
       latencyMs: performance.now() - started,
       judgeStats: combineStats(directoryJudgeStats, fileJudgeStats, symbolJudgeStats),
       directoryJudgeStats,
@@ -741,6 +867,7 @@ export async function discoverEntries(
       symbolJudgeStats,
       stageLatencyMs: { directory: directoryLatencyMs, file: fileLatencyMs, symbol: symbolLatencyMs },
       warnings,
+      unanalysedLeads,
     };
   }
 }

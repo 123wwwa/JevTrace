@@ -64,6 +64,95 @@ test('repository discovery and compiler resolution support multiple named tsconf
   assert.ok(adapter.dependencies(entry).edges.some(edge => edge.target.name === 'decodeJWT'));
 });
 
+test('a config that includes only entry points still owns the project modules they import', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-entry-include-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'src/passes'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'web'));
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' },
+    include: ['src/library.ts'],
+  }));
+  fs.writeFileSync(path.join(root, 'src/library.ts'), 'import { rename } from "./rename.js";\nexport function recoverNames(source: string) { return rename(source); }\n');
+  fs.writeFileSync(path.join(root, 'src/rename.ts'), 'import { suffix } from "./passes/suffix.js";\nimport { legacy } from "./legacy.js";\nexport function rename(name: string) { return suffix(name) + legacy(); }\n');
+  fs.writeFileSync(path.join(root, 'src/passes/suffix.ts'), 'export function suffix(name: string) { return name + "_1"; }\n');
+  // Without allowJs the compiler does not load JavaScript, so neither does the project.
+  fs.writeFileSync(path.join(root, 'src/legacy.js'), 'export function legacy() { return ""; }\n');
+  fs.writeFileSync(path.join(root, 'src/unused.ts'), 'export function unused() { return 0; }\n');
+  fs.writeFileSync(path.join(root, 'web/app.js'), 'export function playground() { return 0; }\n');
+
+  const names = new Set(new RepositoryIndex(root).scan(100).nodes.map(node => `${node.file}:${node.name}`));
+  assert.ok(names.has('src/library.ts:recoverNames'));
+  assert.ok(names.has('src/rename.ts:rename'));
+  assert.ok(names.has('src/passes/suffix.ts:suffix'));
+  // Sources neither included nor imported stay out, as before.
+  assert.ok(!names.has('src/legacy.js:legacy'));
+  assert.ok(!names.has('src/unused.ts:unused'));
+  assert.ok(!names.has('web/app.js:playground'));
+
+  // An imported module resolves through the including config, so its own calls are followed.
+  const adapter = new TypeScriptAdapter(root);
+  const entry = adapter.findEntry({ file: 'src/rename.ts', symbol: 'rename' });
+  assert.ok(adapter.dependencies(entry).edges.some(edge => edge.target.name === 'suffix'));
+});
+
+function playgroundFixture(t) {
+  const root = fixture(t);
+  fs.mkdirSync(path.join(root, 'web'));
+  fs.writeFileSync(path.join(root, 'web/worker.js'), 'export function startWorker() { return 1; }\n');
+  fs.writeFileSync(path.join(root, 'web/transport.js'), 'export function send() { return 2; }\n');
+  // A build copy the repository ignores: never reported.
+  fs.mkdirSync(path.join(root, 'pages-dist'));
+  fs.writeFileSync(path.join(root, 'pages-dist/worker.js'), 'export function startWorker() { return 1; }\n');
+  fs.writeFileSync(path.join(root, '.gitignore'), 'pages-dist/\n');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  return root;
+}
+
+/** Scores every directory scope by name; files and symbols as the semantic fixture does. Counts judge calls. */
+function scopeJudge(directoryScore) {
+  const calls = [];
+  const judge = semanticJudge();
+  return {
+    calls,
+    judge: {
+      ...judge,
+      async judgeFiles(task, nodes, context) {
+        calls.push(nodes.map(node => node.id));
+        if (!nodes[0].id.startsWith('dir::')) return judge.judgeFiles(task, nodes, context);
+        return { decisions: new Map(nodes.map(node => [node.id, { include: true, score: directoryScore(node) }])), stats: { batches: [] } };
+      },
+    },
+  };
+}
+
+test('sources outside the TypeScript project are listed, minus git-ignored ones, and not indexed', t => {
+  const root = playgroundFixture(t);
+  const inventory = new RepositoryIndex(root).scan(100);
+  assert.deepEqual(inventory.unanalysedFiles, ['web/transport.js', 'web/worker.js']);
+  assert.ok(!inventory.nodes.some(node => node.file.startsWith('web/')));
+});
+
+test('a task about sources JevTrace does not analyse is answered as not covered after the directory stage', async t => {
+  const root = playgroundFixture(t);
+  const { judge, calls } = scopeJudge(node => node.id.startsWith('dir::unanalysed::') ? 0.9 : 0.2);
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), judge, judge, 'Fix the browser worker restart');
+  assert.equal(result.status, 'not-covered');
+  assert.deepEqual(result.discovery.unanalysedLeads.map(lead => [lead.directory, lead.files]), [['web', ['web/transport.js', 'web/worker.js']]]);
+  assert.equal(calls.length, 1, 'no file or symbol stage runs');
+  assert.ok(calls[0].includes('dir::unanalysed::web') && !calls[0].some(id => id.includes('pages-dist')));
+});
+
+test('when analysed code is about as relevant, retrieval proceeds and names the unanalysed directory', async t => {
+  const root = playgroundFixture(t);
+  const { judge } = scopeJudge(node => node.id.startsWith('dir::unanalysed::') ? 0.8 : 0.7);
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), judge, judge, 'Fix refresh token validation');
+  assert.ok('items' in result, JSON.stringify(result.warnings));
+  assert.ok(result.items.some(item => item.node.name === 'refreshToken'));
+  assert.ok(result.notes.some(note => /^Also relevant, not analysed by JevTrace.*web\/ \(web\/transport\.js, web\/worker\.js\)/.test(note)));
+  assert.ok(!result.warnings.some(warning => /not analysed/.test(warning)), 'a pointer, not a degradation');
+});
+
 test('explicit entry resolution rejects missing files before TypeScript project loading', t => {
   const root = fixture(t);
   const adapter = new TypeScriptAdapter(root);
@@ -311,17 +400,10 @@ test('MCP exposes discovery and accepts task-only retrieval through its wire sch
   assert.ok(listed.tools.some(tool => tool.name === 'discover_entries'));
   assert.ok(listed.tools.some(tool => tool.name === 'retrieve_from_entry'));
   const retrievalTool = listed.tools.find(tool => tool.name === 'retrieve_dependency_context');
-  assert.equal(retrievalTool?._meta?.ui?.resourceUri, 'ui://jevtrace/context-savings-v2.html');
+  // No UI is attached, so hosts show no dashboard on every retrieval; savings are shown on request.
+  assert.equal(retrievalTool?._meta?.ui, undefined);
   assert.equal(retrievalTool?.inputSchema?.properties?.file, undefined);
-  const resources = await request('resources/list', {});
-  assert.ok(resources.resources.some(resource => resource.uri === 'ui://jevtrace/context-savings-v2.html'));
-  assert.ok(resources.resources.some(resource => resource.uri === 'ui://jevtrace/context-savings.html'));
-  const ui = await request('resources/read', { uri: 'ui://jevtrace/context-savings-v2.html' });
-  assert.match(ui.contents[0].mimeType, /mcp-app/);
-  assert.match(ui.contents[0].text, /JevTrace Context Savings/);
-  const legacyUi = await request('resources/read', { uri: 'ui://jevtrace/context-savings.html' });
-  assert.match(legacyUi.contents[0].mimeType, /mcp-app/);
-  assert.match(legacyUi.contents[0].text, /JevTrace Context Savings/);
+  assert.ok(listed.tools.some(tool => tool.name === 'usage_stats'));
   const discovered = await request('tools/call', { name: 'discover_entries', arguments: { task: 'refresh token' } });
   assert.equal(discovered.isError, undefined);
   assert.equal(discovered.structuredContent.mode, 'lexical');

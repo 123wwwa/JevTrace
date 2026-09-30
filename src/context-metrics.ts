@@ -34,25 +34,17 @@ export class RetrievalLatencyWindow {
   }
 }
 
-/** Cumulative totals after a retrieval: [retrieval number, candidate tokens so far, returned tokens so far]. */
-export type SessionSavingsPoint = [retrieval: number, candidateTokens: number, returnedTokens: number];
-
 export interface SessionSavingsStats {
   retrievals: number;
   candidateTokens: number;
   returnedTokens: number;
   savedTokens: number;
   reductionPercent: number;
-  /** Cumulative curve for the dashboard chart; thinned to at most `maxPoints` (the last point is always kept). */
-  points: SessionSavingsPoint[];
 }
 
 /** Running totals over every task-only retrieval since the server started (in memory, reset on restart). */
 export class SessionSavings {
-  private stats: Omit<SessionSavingsStats, 'points'> = { retrievals: 0, candidateTokens: 0, returnedTokens: 0, savedTokens: 0, reductionPercent: 0 };
-  private points: SessionSavingsPoint[] = [];
-
-  constructor(private readonly maxPoints = 500) {}
+  private stats: SessionSavingsStats = { retrievals: 0, candidateTokens: 0, returnedTokens: 0, savedTokens: 0, reductionPercent: 0 };
 
   record(candidateTokens: number, returnedTokens: number): SessionSavingsStats {
     const retrievals = this.stats.retrievals + 1;
@@ -60,14 +52,11 @@ export class SessionSavings {
     const returned = this.stats.returnedTokens + returnedTokens;
     const saved = this.stats.savedTokens + Math.max(0, candidateTokens - returnedTokens);
     this.stats = { retrievals, candidateTokens: candidate, returnedTokens: returned, savedTokens: saved, reductionPercent: candidate ? saved / candidate : 0 };
-    this.points.push([retrievals, candidate, returned]);
-    // Points are cumulative, so dropping every other one keeps the curve exact at the points that remain.
-    if (this.points.length > this.maxPoints) this.points = this.points.filter((_, index) => index % 2 === 1 || index === this.points.length - 1);
     return this.snapshot();
   }
 
   snapshot(): SessionSavingsStats {
-    return { ...this.stats, points: this.points.map(point => [...point] as SessionSavingsPoint) };
+    return { ...this.stats };
   }
 }
 

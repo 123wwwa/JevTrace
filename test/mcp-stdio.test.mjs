@@ -49,17 +49,31 @@ async function connect(t, root, env = {}) {
 
 const text = result => result.content.map(part => part.text ?? '').join('\n');
 
-test('stdio server lists its tools and UI resources', async t => {
+test('stdio server lists its tools and attaches no UI to them', async t => {
   const { client, transportErrors } = await connect(t, project(t, authProject));
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['discover_entries', 'retrieve_dependency_context', 'retrieve_from_entry']);
-  for (const tool of tools) assert.equal(tool.inputSchema.type, 'object', tool.name);
-  const { resources } = await client.listResources();
-  for (const uri of ['ui://jevtrace/context-savings-v2.html', 'ui://jevtrace/context-savings.html']) {
-    assert.ok(resources.some(resource => resource.uri === uri), uri);
-    const read = await client.readResource({ uri });
-    assert.match(read.contents[0].text, /JevTrace Context Savings/);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['discover_entries', 'retrieve_dependency_context', 'retrieve_from_entry', 'usage_stats']);
+  for (const tool of tools) {
+    assert.equal(tool.inputSchema.type, 'object', tool.name);
+    assert.equal(tool._meta?.ui, undefined, tool.name);
   }
+  assert.deepEqual(transportErrors, []);
+});
+
+test('usage_stats reports the usage log and this session only when asked', async t => {
+  const root = project(t, authProject);
+  const { client, transportErrors } = await connect(t, root, { JEVTRACE_USAGE_LOG: path.join(root, 'usage.jsonl'), CLAUDE_CONFIG_DIR: root });
+  const empty = await client.callTool({ name: 'usage_stats', arguments: {} });
+  assert.ok(!empty.isError, text(empty));
+  assert.match(text(empty), /Tool calls: none recorded/);
+  assert.match(text(empty), /This server session: no retrievals yet\./);
+
+  await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'Fix refresh token validation' } });
+  const stats = await client.callTool({ name: 'usage_stats', arguments: { days: 7 } });
+  assert.match(text(stats), /JevTrace usage, last 7 days/);
+  assert.match(text(stats), /Tool calls: 1 \(retrieve_dependency_context 1\)/);
+  assert.match(text(stats), /This server session: [\d,]+ tokens excluded from [\d,]+ candidates across 1 retrieval /);
+  assert.equal(stats.structuredContent.session.retrievals, 1);
   assert.deepEqual(transportErrors, []);
 });
 
@@ -190,10 +204,7 @@ test('session savings accumulate across task-only retrievals and survive a no-co
   assert.equal(b.session.retrievals, 2);
   assert.equal(b.session.candidateTokens, a.candidateTokens + b.candidateTokens);
   assert.equal(b.session.savedTokens, a.savedTokens + b.savedTokens);
-  assert.deepEqual(b.session.points, [
-    [1, a.candidateTokens, a.returnedTokens],
-    [2, a.candidateTokens + b.candidateTokens, a.returnedTokens + b.returnedTokens],
-  ], 'the dashboard curve is cumulative per retrieval');
+  assert.equal(b.session.returnedTokens, a.returnedTokens + b.returnedTokens);
   assert.equal(b.stage4Applied, false, 'the offline include-all judge ranks nothing');
   assert.match(text(second), /Session so far: .* across 2 retrievals/);
 

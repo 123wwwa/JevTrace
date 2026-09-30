@@ -105,7 +105,7 @@ export async function retrieveTaskContext(
   contextJudge: RelevanceJudge,
   task: string,
   options: TaskPipelineOptions = {},
-): Promise<TaskPipelineResult | BroadTaskResult | { task: string; status: 'incomplete'; discovery: DiscoveryResult; warnings: string[] }> {
+): Promise<TaskPipelineResult | BroadTaskResult | { task: string; status: 'incomplete' | 'not-covered'; discovery: DiscoveryResult; warnings: string[] }> {
   options.signal?.throwIfAborted();
   const tokenBudget = options.tokenBudget ?? 8000;
   const maxLeads = options.maxLeads ?? 4;
@@ -168,6 +168,9 @@ export async function retrieveTaskContext(
   // Billed like any other discovery request.
   // A new object: the per-stage stats may share one array.
   if (scope) discovery.judgeStats = { batches: [...discovery.judgeStats.batches, ...scope.stats.batches] };
+  if (discovery.status === 'not-covered') {
+    return { task, status: 'not-covered', discovery, warnings: discovery.warnings };
+  }
   if (!discovery.semanticLeads.length) {
     return {
       task,
@@ -181,7 +184,7 @@ export async function retrieveTaskContext(
   const unresolved: Unresolved[] = [];
   // warnings: something degraded the result (a failed provider stage, an unresolvable lead). notes: normal
   // bounds and static-analysis limits, reported so they can be inspected without reading as a failure.
-  const informational = (message: string) => /^(Task scope check failed|Lexical RRF retained|Jev directory pass selected|Jev repository-structure discovery is disabled|Skipped source larger than 1 MiB)/.test(message)
+  const informational = (message: string) => /^(Also relevant, not analysed by JevTrace|Task scope check failed|Lexical RRF retained|Jev directory pass selected|Jev repository-structure discovery is disabled|Skipped source larger than 1 MiB)/.test(message)
     || /analysed without their base config/.test(message);
   const warnings = discovery.warnings.filter(message => !informational(message));
   const notes = discovery.warnings.filter(informational);

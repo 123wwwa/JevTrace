@@ -284,6 +284,8 @@ ${item.level === 'body' ? item.node.source : item.node.signature}
       `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
       ...result.warnings.map(w => `Warning: ${w}`),
       ...(result.notes?.length ? [`Notes: ${result.notes.join('; ')}`] : []),
+      // Agents otherwise tend to reread whole files to re-confirm code they were just given.
+      'The code below is the current source, linked by the TypeScript compiler. Work from it; read files only for what it does not show.',
       '', '## Context',
     ].join('\n');
   };

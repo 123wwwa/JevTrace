@@ -64,7 +64,7 @@ export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env):
     const byTool = new Map<string, UsageEntry[]>();
     for (const entry of calls) byTool.set(entry.tool, [...(byTool.get(entry.tool) ?? []), entry]);
     lines.push(`Tool calls: ${calls.length} (${[...byTool].map(([tool, entries]) => `${tool} ${entries.length}`).join(', ')})`);
-    lines.push(`  failed: ${calls.filter(entry => !entry.ok).length}, no relevant code found: ${retrievals.filter(entry => entry.outcome === 'no-context').length}`);
+    lines.push(`  failed: ${calls.filter(entry => !entry.ok).length}, no relevant code found: ${retrievals.filter(entry => entry.outcome === 'no-context').length}, outside the analysed project: ${retrievals.filter(entry => entry.outcome === 'not-covered').length}`);
     const withSavings = retrievals.filter(entry => entry.candidateTokens !== undefined);
     const candidate = sum(withSavings.map(entry => entry.candidateTokens));
     const saved = sum(withSavings.map(entry => entry.savedTokens));

@@ -41,10 +41,12 @@ const minSplitFiles = 6;
 export interface SourceInventory {
   files: Map<string, string[]>;
   testFiles: number;
+  /** Sources in subdirectories outside the analysed project (see RepositoryIndex.scan), by path. */
+  unanalysed: string[];
 }
 
 export function sourceInventory(index: RepositoryIndex, maxFiles = defaultMaxFiles): SourceInventory {
-  const { nodes } = index.scan(maxFiles);
+  const { nodes, unanalysedFiles } = index.scan(maxFiles);
   const files = new Map<string, string[]>();
   for (const node of nodes) {
     if (testFile.test(node.file)) continue;
@@ -54,7 +56,19 @@ export function sourceInventory(index: RepositoryIndex, maxFiles = defaultMaxFil
     if (!names.includes(name)) names.push(name);
     files.set(node.file, names);
   }
-  return { files, testFiles: new Set(nodes.map(node => node.file).filter(file => testFile.test(file))).size };
+  return { files, testFiles: new Set(nodes.map(node => node.file).filter(file => testFile.test(file))).size, unanalysed: unanalysedFiles };
+}
+
+/** Top-level directories of sources JevTrace does not analyse, to review with Grep/Read instead. */
+function unanalysedSection(inventory: SourceInventory): string {
+  if (!inventory.unanalysed.length) return '';
+  const byTop = new Map<string, number>();
+  for (const file of inventory.unanalysed) {
+    const top = file.slice(0, file.indexOf('/'));
+    byTop.set(top, (byTop.get(top) ?? 0) + 1);
+  }
+  const areas = [...byTop].sort(([a], [b]) => a.localeCompare(b)).map(([top, count]) => `${top}/ — ${count} file${count === 1 ? '' : 's'}`);
+  return ['', '', 'Not analysed by JevTrace (outside the TypeScript project; review these with Grep/Read, not JevTrace):', ...areas].join('\n');
 }
 
 const directoryOf = (file: string): string => {
@@ -74,6 +88,9 @@ const namesOf = (inventory: SourceInventory, files: string[], limit: number): { 
  */
 export function repositoryMap(inventory: SourceInventory, maxChars: number): string {
   const { files, testFiles } = inventory;
+  // Listed after the map and kept whole: the map is what gets merged or truncated to make room.
+  const unanalysed = unanalysedSection(inventory);
+  maxChars = Math.max(200, maxChars - unanalysed.length);
   const deepest = Math.max(1, ...[...files.keys()].map(file => path.posix.dirname(file).split('/').length));
   let body = '';
   for (let depth = deepest; depth >= 1; depth--) {
@@ -90,7 +107,7 @@ export function repositoryMap(inventory: SourceInventory, maxChars: number): str
   }
   const heading = `Repository map: ${files.size} source files${testFiles ? ` (+${testFiles} test files)` : ''}; top-level declarations per directory.`;
   const text = `${heading}\n${body}`;
-  return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 40)).replace(/\n[^\n]*$/, '')}\n… (map truncated)`;
+  return (text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 40)).replace(/\n[^\n]*$/, '')}\n… (map truncated)`) + unanalysed;
 }
 
 /**
@@ -100,7 +117,7 @@ export function repositoryMap(inventory: SourceInventory, maxChars: number): str
  * task tried, in English and Korean, where prefixing the area instead could still read as project-wide.
  */
 export function suggestSubtasks(task: string, inventory: SourceInventory, max = 16): Subtask[] {
-  type Area = { directory: string; files: string[] };
+  type Area = { directory: string; files: string[]; byFile?: boolean };
   let areas: Area[] = [{ directory: '', files: [...inventory.files.keys()] }];
   const children = (area: Area): Map<string, string[]> => {
     const groups = new Map<string, string[]>();
@@ -131,12 +148,24 @@ export function suggestSubtasks(task: string, inventory: SourceInventory, max = 
     if (areas.length - 1 + groups.size > max) break;
     areas = [...areas.slice(0, position), ...[...groups].map(([directory, files]) => ({ directory, files })), ...areas.slice(position + 1)];
   }
+  // All sources directly in one directory (a flat `src/`): there are no subdirectories to split by, and a
+  // single subtask would only repeat the task. Split it into runs of files in name order, named by their files.
+  const [only] = areas;
+  if (areas.length === 1 && only.files.length >= minSplitFiles && only.files.every(file => directoryOf(file) === only.directory)) {
+    const count = Math.min(max, only.files.length);
+    const sorted = [...only.files].sort();
+    areas = Array.from({ length: count }, (_, index) => ({
+      directory: only.directory,
+      files: sorted.slice(Math.floor(index * sorted.length / count), Math.floor((index + 1) * sorted.length / count)),
+      byFile: true,
+    }));
+  }
   return areas.filter(area => area.files.length)
     .sort((a, b) => a.directory.localeCompare(b.directory))
     .map(area => {
       const { shown } = namesOf(inventory, area.files, namesPerSubtask);
       const nested = areas.some(other => other !== area && other.directory.startsWith(`${area.directory}/`)) || (!area.directory && areas.length > 1);
-      const where = nested ? `${label(area.directory)} (files directly in it)` : label(area.directory);
+      const where = area.byFile ? area.files.join(', ') : nested ? `${label(area.directory)} (files directly in it)` : label(area.directory);
       return { area: where, files: area.files.length, task: `${task} — only in ${where}${shown.length ? ` (${shown.join(', ')})` : ''}` };
     });
 }

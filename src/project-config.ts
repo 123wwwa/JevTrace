@@ -75,7 +75,7 @@ export function parseProjectConfigs(root: string): { projects: ParsedProjectConf
     projects.push({
       path: configPath,
       parsed,
-      files: new Set(parsed.fileNames.map(fileName => path.resolve(fileName))),
+      files: importClosure(parsed, tsPath),
     });
   }
 
@@ -84,6 +84,52 @@ export function parseProjectConfigs(root: string): { projects: ParsedProjectConf
     warnings.push(`${withoutBase.length} project${withoutBase.length === 1 ? '' : 's'} analysed without their base config, which was not found (${shown}${withoutBase.length > 4 ? `, +${withoutBase.length - 4} more` : ''}); install dependencies for exact compiler options`);
   }
   return { projects, warnings };
+}
+
+const importCache = new Map<string, { version: string; imports: string[] }>();
+
+function importsOf(file: string): string[] {
+  let version: string;
+  try {
+    const stat = fs.statSync(file, { bigint: true });
+    version = `${stat.mtimeNs}:${stat.size}`;
+  } catch {
+    return [];
+  }
+  const cached = importCache.get(file);
+  if (cached?.version === version) return cached.imports;
+  const info = ts.preProcessFile(ts.sys.readFile(file) ?? '', true, true);
+  const imports = info.importedFiles.map(reference => reference.fileName);
+  importCache.set(file, { version, imports });
+  return imports;
+}
+
+const javaScriptExtensions = new Set<string>([ts.Extension.Js, ts.Extension.Jsx, ts.Extension.Mjs, ts.Extension.Cjs]);
+const typeScriptExtensions = new Set<string>([ts.Extension.Ts, ts.Extension.Tsx, ts.Extension.Mts, ts.Extension.Cts]);
+
+/**
+ * The files a config includes plus the project sources they import, as the compiler loads them: a config
+ * that lists only its entry points (`"include": ["src/index.ts"]`) still owns the modules behind them.
+ * Declaration files, dependencies and, without allowJs, JavaScript files stay out, as in the program.
+ */
+function importClosure(parsed: ts.ParsedCommandLine, configPath: string): Set<string> {
+  const files = new Set(parsed.fileNames.map(fileName => path.resolve(fileName)));
+  const cache = ts.createModuleResolutionCache(path.dirname(configPath), name => ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase(), parsed.options);
+  // Vue components are read through their script blocks elsewhere; their imports are not followed here.
+  const queue = [...files].filter(file => !/\.vue$/i.test(file));
+  while (queue.length) {
+    const importer = queue.pop()!;
+    for (const specifier of importsOf(importer)) {
+      const resolved = ts.resolveModuleName(specifier, importer.replaceAll('\\', '/'), parsed.options, ts.sys, cache).resolvedModule;
+      if (!resolved || resolved.isExternalLibraryImport) continue;
+      const allowed = typeScriptExtensions.has(resolved.extension) || (parsed.options.allowJs && javaScriptExtensions.has(resolved.extension));
+      const file = path.resolve(resolved.resolvedFileName);
+      if (!allowed || files.has(file) || file.split(path.sep).includes('node_modules')) continue;
+      files.add(file);
+      queue.push(file);
+    }
+  }
+  return files;
 }
 
 export function selectProjectFromParsed(projects: ParsedProjectConfig[], file: string): ParsedProjectConfig | undefined {

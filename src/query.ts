@@ -5,7 +5,7 @@ import type { BroadTaskResult } from './broad-task.js';
 import type { EntryInput, LanguageAdapter, RelevanceJudge } from './types.js';
 
 export type QueryResult = RetrievalResult & { discovery?: DiscoveryResult };
-export type IncompleteQueryResult = { status: 'incomplete'; task: string; discovery: DiscoveryResult; warnings: string[] };
+export type IncompleteQueryResult = { status: 'incomplete' | 'not-covered'; task: string; discovery: DiscoveryResult; warnings: string[] };
 type QueryOptions = RetrievalOptions & DiscoveryOptions & TaskPipelineOptions;
 
 export function query(index: RepositoryIndex, adapter: LanguageAdapter, judge: RelevanceJudge, task: string,

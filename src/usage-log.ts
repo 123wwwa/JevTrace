@@ -15,7 +15,7 @@ export interface UsageEntry {
   task: string;
   ok: boolean;
   ms: number;
-  /** 'complete' | 'incomplete' | 'no-context' | 'error' */
+  /** 'complete' | 'incomplete' | 'broad' | 'not-covered' | 'no-context' | 'error' */
   outcome: string;
   candidateTokens?: number;
   returnedTokens?: number;

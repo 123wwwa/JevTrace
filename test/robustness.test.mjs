@@ -246,16 +246,13 @@ test('type-level leads only fill lead slots that qualifying callables leave open
   assert.deepEqual(sparse.semanticLeads.map(lead => lead.name), ['alphaRefresh', 'RefreshOptions']);
 });
 
-test('session savings keep an exact cumulative curve when thinned', async () => {
+test('session savings total every retrieval and never count a larger result as negative savings', async () => {
   const { SessionSavings } = await import('../dist/context-metrics.js');
-  const session = new SessionSavings(4);
+  const session = new SessionSavings();
   for (let index = 1; index <= 9; index++) session.record(100, 60);
+  session.record(50, 80);
   const stats = session.snapshot();
-  assert.equal(stats.retrievals, 9);
-  assert.equal(stats.savedTokens, 360);
-  assert.ok(stats.points.length <= 4);
-  assert.deepEqual(stats.points.at(-1), [9, 900, 540], 'the latest point is always kept');
-  for (const [retrieval, candidate, returned] of stats.points) assert.deepEqual([candidate, returned], [retrieval * 100, retrieval * 60]);
+  assert.deepEqual(stats, { retrievals: 10, candidateTokens: 950, returnedTokens: 620, savedTokens: 360, reductionPercent: 360 / 950 });
 });
 
 test('a decision provider with a different wire format plugs in through DecisionBackend alone', async t => {
@@ -434,6 +431,39 @@ test('suggested subtasks split the largest area first and stop before fragmentin
   assert.deepEqual(areas(6), ['src/ (files directly in it):1', 'src/core/:12', 'src/plugins/:10']);
   assert.equal(areas(16).length, 12, 'with room, the largest remaining area (plugins) is split too');
   assert.equal(suggestSubtasks('fix bugs', inventory, 6)[1].task, 'fix bugs — only in src/core/ (core0, core1, core10, core11)');
+});
+
+test('suggested subtasks split a flat source directory into runs of files', async t => {
+  const files = {};
+  for (let i = 0; i < 20; i++) files[`src/m${String(i).padStart(2, '0')}.ts`] = `export function mod${i}() { return ${i}; }\n`;
+  const root = project(t, files);
+  const { sourceInventory, suggestSubtasks } = await import('../dist/broad-task.js');
+  const inventory = sourceInventory(new RepositoryIndex(root));
+  // Without subdirectories, a single "only in src/" subtask would just repeat the task.
+  const subtasks = suggestSubtasks('fix bugs', inventory, 8);
+  assert.equal(subtasks.length, 8);
+  assert.equal(subtasks.reduce((sum, subtask) => sum + subtask.files, 0), 20);
+  assert.equal(subtasks[0].task, 'fix bugs — only in src/m00.ts, src/m01.ts (mod0, mod1)');
+  assert.equal(suggestSubtasks('fix bugs', inventory, 30).length, 20, 'one file each when they fit');
+
+  const small = sourceInventory(new RepositoryIndex(project(t, { 'src/a.ts': 'export function a() { return 1; }\n', 'src/b.ts': 'export function b() { return 2; }\n' })));
+  assert.deepEqual(suggestSubtasks('fix bugs', small).map(subtask => subtask.area), ['src/'], 'a small directory stays whole');
+});
+
+test('the repository map lists directories JevTrace does not analyse, whatever the map budget', async t => {
+  const root = project(t, {
+    'src/a.ts': 'export function a() { return 1; }\n',
+    'web/app.js': 'export function app() { return 1; }\n',
+    'web/worker.js': 'export function worker() { return 1; }\n',
+    'scripts/build.mjs': 'export function build() { return 1; }\n',
+    'vite.config.ts': 'export default {};\n',
+  });
+  const { repositoryMap, sourceInventory } = await import('../dist/broad-task.js');
+  const inventory = sourceInventory(new RepositoryIndex(root));
+  const section = 'Not analysed by JevTrace (outside the TypeScript project; review these with Grep/Read, not JevTrace):\nscripts/ — 1 file\nweb/ — 2 files';
+  assert.ok(repositoryMap(inventory, 100_000).endsWith(section));
+  assert.ok(repositoryMap(inventory, 300).endsWith(section), 'the map shrinks, the list stays');
+  assert.doesNotMatch(repositoryMap(inventory, 100_000), /vite\.config/, 'root files are tool configs, not listed');
 });
 
 test('large repositories: the discovery limit counts indexed files, a missing base config is tolerated, and a big unconfigured repository is scoped around the entry', t => {

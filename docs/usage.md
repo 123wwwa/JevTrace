@@ -21,7 +21,7 @@ JevTrace analyses JavaScript and TypeScript through the TypeScript compiler, so 
 | Size | Discovery indexes up to 20,000 source files (`maxFiles`, up to 100,000); about 5.5 s the first time and 0.6 s after for 5,400 files | Beyond `maxFiles`, later paths in name order are not searched, and the result says so |
 | Tasks | One behaviour, feature or area ("where is X decided", "change how Y works"), in any language | Project-wide requests (review everything, find bugs anywhere, scaffold a project): these get suggested per-area subtasks and a repository map instead of code |
 
-A config owns the directory it is in: sources there that it does not include (for example `.js` files in a TypeScript project without `allowJs`, or scripts outside `include`) are not searched. Sources under no config at all, such as a front end next to an `e2e/tsconfig.json`, are searched and analysed without one. Directories named `node_modules`, `dist`, `build`, `coverage` and `.next`, and source files over 1 MiB, are skipped.
+A config owns the directory it is in: its included files and the project sources they import, as the compiler loads them (a config that lists only entry points, `"include": ["src/index.ts"]`, still covers the modules behind them). Sources there that it neither includes nor imports (for example `.js` files in a TypeScript project without `allowJs`, or scripts outside `include`) are not searched. Sources under no config at all, such as a front end next to an `e2e/tsconfig.json`, are searched and analysed without one. Directories named `node_modules`, `dist`, `build`, `coverage` and `.next`, and source files over 1 MiB, are skipped.
 
 ## CLI
 
@@ -162,33 +162,34 @@ For task-only retrieval, `tokenBudget` (default 8000 estimated tokens) is the fi
 
 Before returning code, `retrieve_dependency_context` asks Jev whether the task names one behaviour or area (in parallel with discovery, so specific tasks are not slowed down). When it does not ("find critical bugs", "review the whole project", "이 프로젝트의 기본적인 틀을 짜줘"), the result has `status: "broad"`, the `specificity` score, and instead of code:
 
-- **Suggested subtasks**: the task restricted to each area of the repository, for example `Find critical bugs in this project — only in src/router/ (LinearRouter, Route, PatternRouter)`. Areas come from splitting the largest directory first (up to 16 areas), so a large `src/` is split before small top-level folders are. Each line passes the scope check on its own and can be passed back as the task, one call per area.
+- **Suggested subtasks**: the task restricted to each area of the repository, for example `Find critical bugs in this project — only in src/router/ (LinearRouter, Route, PatternRouter)`. Areas come from splitting the largest directory first (up to 16 areas), so a large `src/` is split before small top-level folders are. When every source sits directly in one directory (a flat `src/`), the files are split into runs in name order instead, one file each when they fit, for example `… — only in src/rename.ts (rename)`. Each line passes the scope check on its own and can be passed back as the task, one call per area.
 - **A repository map**: each directory with its source-file count and top-level declarations, merged into parent directories to fit `maxChars`.
 
 The server instructions also tell agents that split a larger request to call JevTrace once per subtask, including from subagents. Pass `scopeCheck: false` to retrieve for the exact wording anyway. The check costs one small Jev request, which is counted in the usage log.
 
+The map ends with the directories JevTrace does not analyse (see below), so an agent reviews those with Grep and Read instead of calling JevTrace for them.
+
+### Code JevTrace does not analyse
+
+Sources inside a config's directory that it neither includes nor imports (a browser playground in `web/`, `.test.mjs` files, build scripts) are not indexed, but they are listed by path, per directory. Git-ignored paths are left out, so build copies and generated fixtures are not listed; so are files directly in the repository root, which are mostly tool configs (`vite.config.ts`). Without git every other path is listed.
+
+Discovery's first stage shows those directories to Jev next to the analysed ones, in the same request. Then:
+
+- **An unanalysed directory wins clearly** (by 0.2 or more over the best analysed directory): the result is `status: "not-covered"` with the directories and their files, and nothing else is judged. It comes back after that one stage (about 0.7 s on FlowName instead of 1.3–1.6 s) and tells the agent to search those files directly instead of calling JevTrace again for the task.
+- **Otherwise** retrieval continues as usual, and a note names any unanalysed directory Jev also found relevant (`Also relevant, not analysed by JevTrace …`), for example the `test/` directory next to the code under change.
+
+In a repository whose analysed code is one directory, this adds the directory request that is otherwise skipped whenever unanalysed directories exist.
+
 Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, reverse, wrapper-lookahead, and visit-policy controls.
 
-### Context savings UI (MCP Apps)
+### Token savings
 
-`retrieve_dependency_context` also publishes a versioned MCP Apps view (currently `ui://jevtrace/context-savings-v2.html`) so hosts do not reuse stale dashboard bundles after UI changes. The legacy `ui://jevtrace/context-savings.html` URI remains registered as an alias to the latest bundle so existing chat results do not break. Hosts that support MCP Apps render the result as an inline dashboard; other hosts receive the same text and structured content.
+Nothing is shown in the chat on its own. Every task-only result ends with a short `Session so far:` line for the agent, and the same totals are in the structured result as `contextSavings.session`. To see the savings when you want to:
 
-The dashboard shows one thing: **how many tokens JevTrace has saved in this session**.
+- **Ask the agent**, for example "How many tokens has JevTrace saved?". It calls the `usage_stats` tool, which returns the usage-log summary for the last 30 days (or `days`) plus the totals since this server started. The tool is described to agents as for that question only, so it is not called during coding tasks.
+- **Run `stats`** in a terminal (see [Usage log and `stats`](#usage-log-and-stats)).
 
-- A headline number: estimated tokens saved across every task-only retrieval since the server started, with the overall reduction and retrieval count.
-- A cumulative chart: tokens that would have been sent without JevTrace (every compiler candidate, dashed gray) against tokens actually sent to the agent (blue); the shaded gap is the saving. Hover or use the arrow keys to read the totals after any retrieval. After a single retrieval it is shown as two bars.
-- A **Details** popover with the latest retrieval only (candidate pool, sent tokens, symbols, provider requests, context ranking, time, status).
-
-The same totals are in the structured result as `contextSavings.session` (with cumulative `points`, thinned to at most 500) and in the text result as a `Session so far:` line.
-
-The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts. The dashboard is attached to the task-only tool only. It follows the host's light/dark theme from the MCP Apps host context, shows the host-supplied error message when a call fails, and shows a "no relevant code" notice (with the session totals) when discovery finds nothing.
-
-To see the dashboard without an MCP Apps host, record real results from the stdio server and open the bundled test host, which renders them the way a host does (sandboxed iframe plus the ext-apps `AppBridge`):
-
-```bash
-npm run ui:preview            # add -- --online to use the provider in .env, -- --root <dir> for another project
-npm run ui:host               # then open http://localhost:5179
-```
+The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.
 
 ## Benchmarks
 

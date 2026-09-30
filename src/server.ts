@@ -1,21 +1,17 @@
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { McpServer } from '@modelcontextprotocol/server';
-import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import * as z from 'zod/v4';
 import { TypeScriptAdapter } from './typescript-adapter.js';
 import { createJudge } from './judges.js';
 import { formatContext } from './retrieve.js';
 import { query } from './query.js';
-import { RepositoryIndex, defaultMaxFiles, discoverEntries, type DiscoveryResult } from './discovery.js';
+import { RepositoryIndex, defaultMaxFiles, describeUnanalysed, discoverEntries, type DiscoveryResult } from './discovery.js';
 import type { TaskPipelineResult } from './task-pipeline.js';
-import { formatContextSavings, RetrievalLatencyWindow, SessionSavings, summarizeContextSavings, type SessionSavingsStats } from './context-metrics.js';
+import { formatContextSavings, RetrievalLatencyWindow, SessionSavings, summarizeContextSavings } from './context-metrics.js';
+import { formatStats } from './stats.js';
 import { appendUsage, jevUsage } from './usage-log.js';
 import type { JudgeCallStats } from './types.js';
-
-const CONTEXT_UI_URI = 'ui://jevtrace/context-savings-v2.html';
-const LEGACY_CONTEXT_UI_URI = 'ui://jevtrace/context-savings.html';
 
 // Structured results carry metadata only. Hosts such as Claude Code pass structuredContent to the model
 // alongside the text, so shipping candidate pools with full source there bypassed maxChars (hundreds of
@@ -25,14 +21,6 @@ const nodeRef = (node: Node) => ({ name: node.name, file: node.file, startLine: 
 const leadRef = (lead: { name: string; file: string; line: number; score?: number }) => ({ name: lead.name, file: lead.file, line: lead.line, score: lead.score });
 const compactItems = (items: Array<{ node: Node; level: string; kind?: string; score?: number }>) =>
   items.map(item => ({ node: nodeRef(item.node), level: item.level, kind: item.kind, score: item.score }));
-/** The chart needs the curve's shape, not every point; every result also reaches the model. */
-function thinSession(session: SessionSavingsStats): SessionSavingsStats {
-  const max = 60;
-  if (session.points.length <= max) return session;
-  const step = session.points.length / max;
-  const points = Array.from({ length: max - 1 }, (_, index) => session.points[Math.floor(index * step)]);
-  return { ...session, points: [...points, session.points.at(-1)!] };
-}
 
 function compactDiscovery(discovery: DiscoveryResult) {
   return {
@@ -47,7 +35,10 @@ function compactDiscovery(discovery: DiscoveryResult) {
 
 export function createServer(root = process.cwd()): McpServer {
   const server = new McpServer({ name: 'jevtrace', version: '0.1.0' }, {
-    instructions: 'JevTrace finds the code a JavaScript/TypeScript coding task needs when you do not yet know where it lives, especially when the change spans several files. In that case call retrieve_dependency_context with the task before searching with grep: it returns the relevant functions plus the callers, callees, types and tests the TypeScript compiler links to them, within a token budget. Describe one behaviour or area. When you split a larger request (review everything, fix bugs anywhere, a change touching several features) into subtasks, call it once per subtask, including from subagents; a project-wide request returns suggested per-area subtasks and a repository map instead of code.If you already know the file or symbol, read it directly instead. Read further files only for what the result did not cover.',
+    // A benchmark found agents skipping JevTrace whenever the task named a keyword ("Retry-After"): an earlier
+    // "read it directly if you know the symbol" clause gave them the reason. The call is worth making anyway,
+    // since a keyword search does not bring the callers, types and tests.
+    instructions: 'JevTrace answers "which code does this JavaScript/TypeScript task involve" in one call. For any task or question about how, where or why something works in this repository, or a change to it, call retrieve_dependency_context with the task before using Grep, Glob or Read, also when the task names a keyword, function or file: the result has that code plus the callers, callees, types and tests the TypeScript compiler links to it, which a keyword search does not find. The code it returns is the current source; work from it and read files only for what it does not show. Describe one behaviour or area per call. When you split a larger request (review everything, fix bugs anywhere, a change touching several features) into subtasks, call it once per subtask, including from subagents; a project-wide request returns suggested per-area subtasks and a repository map instead of code.',
   });
   const projectRoot = path.resolve(root);
   const adapter = new TypeScriptAdapter(projectRoot);
@@ -65,23 +56,9 @@ export function createServer(root = process.cwd()): McpServer {
     try { return await work(); } finally { release(); }
   };
 
-  const registerContextUi = (uri: string) => {
-    registerAppResource(server, 'JevTrace context savings', uri, {
-      title: 'JevTrace Context Savings',
-      description: 'Interactive context-reduction and retrieval telemetry for retrieve_dependency_context.',
-      mimeType: RESOURCE_MIME_TYPE,
-    }, async resourceUri => {
-      const html = await readFile(new URL('./context-savings.html', import.meta.url), 'utf8');
-      return { contents: [{ uri: resourceUri.href, mimeType: RESOURCE_MIME_TYPE, text: html }] };
-    });
-  };
-  registerContextUi(CONTEXT_UI_URI);
-  registerContextUi(LEGACY_CONTEXT_UI_URI);
-
-  registerAppTool(server, 'retrieve_dependency_context', {
+  server.registerTool('retrieve_dependency_context', {
     title: 'Retrieve JevTrace context',
-    description: 'Use first when a JS/TS task needs code you have not located yet ("where is X handled", "change how Y works"): give the task in plain words and get the implementing functions plus the callers, callees, types and tests the TypeScript compiler links to them, within a token budget. Cheaper than searching and reading files one by one. Do not pass a file or line; describe the task.',
-    _meta: { ui: { resourceUri: CONTEXT_UI_URI } },
+    description: 'Call first for a JS/TS task or question about this repository ("where is X handled", "change how Y works", "why does Z happen"), even when it names a function, keyword or file: describe the task in plain words and get, in one call, the implementing code plus the callers, callees, types and tests the TypeScript compiler links to it, within a token budget. It usually replaces a series of Grep and Read calls. The code in the result is the current source: work from it and read files only for what it does not show. Do not pass a file or line; describe the task.',
     inputSchema: z.object({
       task: z.string().min(1).describe('The coding task, including the intended change or bug'),
       maxCandidates: z.number().int().min(1).max(128).default(64),
@@ -123,7 +100,20 @@ export function createServer(root = process.cwd()): McpServer {
 
 ${result.map}`.slice(0, maxChars);
         return { content: [{ type: 'text', text }],
-          structuredContent: { context: text, task, status: result.status, specificity: result.specificity, session: thinSession(sessionSavings.snapshot()) } };
+          structuredContent: { context: text, task, status: result.status, specificity: result.specificity, session: sessionSavings.snapshot() } };
+      }
+      if (result.status === 'not-covered') {
+        appendUsage({ time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: projectRoot, task, ok: true,
+          ms: Math.round(performance.now() - started), outcome: 'not-covered', ...jevUsage(result.discovery.judgeStats) });
+        const text = [
+          'Not covered: this task is about sources JevTrace does not analyse (outside every tsconfig/jsconfig include and not imported by included files), so it returned no code.',
+          `Search these directly with Grep/Read instead of calling JevTrace again for this task: ${describeUnanalysed(result.discovery.unanalysedLeads, 12)}`,
+          ...result.warnings.map(warning => `Warning: ${warning}`),
+        ].join('\n').slice(0, maxChars);
+        return { content: [{ type: 'text', text }],
+          structuredContent: { context: text, task, status: result.status,
+            unanalysed: result.discovery.unanalysedLeads.map(lead => ({ directory: lead.directory, score: lead.score, files: lead.files.slice(0, 50) })),
+            session: sessionSavings.snapshot() } };
       }
       const discoveryText = result.discovery ? `Entry discovery (${result.discovery.mode}): ${result.discovery.selected ? `${result.discovery.selected.file}:${result.discovery.selected.line}` : 'no suitable entry'}\n` : '';
       if ('items' in result) {
@@ -145,16 +135,16 @@ ${result.map}`.slice(0, maxChars);
             task, status: result.status, warnings: result.warnings, usedTokens: result.usedTokens, tokenBudget: result.tokenBudget,
             entry: nodeRef(result.entry), items: compactItems(result.items), omittedCount: result.omitted.length,
             rankingPool: 'rankingPool' in result ? { stats: (result as TaskPipelineResult).rankingPool.stats } : undefined,
-            contextSavings: { ...contextSavings, session: contextSavings.session && thinSession(contextSavings.session) },
+            contextSavings,
           },
         };
       }
       appendUsage({ time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: projectRoot, task, ok: true,
         ms: Math.round(performance.now() - started), outcome: 'no-context', ...jevUsage(result.discovery?.judgeStats) });
-      // No context was found; the dashboard still shows the session totals so far.
+      // No context was found; the session totals so far are still reported.
       const text = (discoveryText + result.warnings.join('\n')).slice(0, maxChars);
       return { content: [{ type: 'text', text }],
-        structuredContent: { context: text, task, status: result.status, warnings: result.warnings, discovery: compactDiscovery(result.discovery), session: thinSession(sessionSavings.snapshot()) } };
+        structuredContent: { context: text, task, status: result.status, warnings: result.warnings, discovery: compactDiscovery(result.discovery), session: sessionSavings.snapshot() } };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       appendUsage({ time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: message.slice(0, 300) });
@@ -241,6 +231,20 @@ ${result.map}`.slice(0, maxChars);
       appendUsage({ time: new Date().toISOString(), tool: 'discover_entries', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: message.slice(0, 300) });
       return { isError: true, content: [{ type: 'text', text: message }] };
     }
+  });
+  server.registerTool('usage_stats', {
+    title: 'JevTrace usage and token savings',
+    description: 'Only when the user asks how JevTrace has been used or how many tokens it has saved: returns the local usage log summary (calls, tokens sent and excluded, Jev cost) plus the totals since this server started. Not needed for coding tasks.',
+    inputSchema: z.object({
+      days: z.number().int().min(1).max(3650).default(30).describe('How many past days of the usage log to summarize'),
+    }),
+  }, async ({ days }) => {
+    const session = sessionSavings.snapshot();
+    const current = session.retrievals
+      ? `This server session: ${session.savedTokens.toLocaleString('en-US')} tokens excluded from ${session.candidateTokens.toLocaleString('en-US')} candidates across ${session.retrievals} retrieval${session.retrievals === 1 ? '' : 's'} (${(session.reductionPercent * 100).toFixed(1)}%).`
+      : 'This server session: no retrievals yet.';
+    const text = `${formatStats(days)}\n\n${current}`;
+    return { content: [{ type: 'text', text }], structuredContent: { days, session } };
   });
   return server;
 }
