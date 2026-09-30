@@ -4,40 +4,44 @@ Does a coding agent spend less when a code-context tool is available? The same a
 
 **Status: pilot.** 5 focused tasks, one session per task and arm, one model. Treat the numbers as a direction, not a result; see [Limitations](#limitations).
 
-## Results: each tool as its instructions tell the agent to use it (medians over 5 tasks)
+## Results (medians over 5 tasks)
+
+Without any instruction, only the tool registered (the default setup):
+
+| Arm | Agent tokens | Repository searches | Sessions that never called the tool | Files read | API cost | Wall time | Labelled code in final answer |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Baseline (Read, Grep, Glob) | 97k | 6 | – | 3 | $0.079 | 25 s | 15/15 |
+| **+ JevTrace** | **50k** | **0** | **0 of 5** | **0** | $0.112 | **20 s** | **15/15** |
+| + jevgrep (with its skill) | 150k | 4 | 3 of 5 | 2 | $0.089 | 26 s | 12/15 |
+| + ttsc | 206k | 6 | 0 of 5 | 4 | $0.143 | 32 s | 14/15 |
+
+With one system-prompt line saying to call the tool first, the same sentence for all three (for jevgrep, on top of its own skill):
 
 | Arm | Agent tokens | Repository searches | Tool calls | Files read | API cost | Jev cost | Wall time | Labelled code in final answer | Labelled code in tool's first answer |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline (Read, Grep, Glob) | 120k | 6 | 0 | 2 | $0.111 | – | 27 s | 13/15 | – |
-| **+ JevTrace** | **50k** | **0** | 1 | **0** | **$0.085** | $0.004 | **19 s** | **15/15** | **15/15** (7.2k tokens) |
+| **+ JevTrace** | **49k** | **0** | 1 | **0** | **$0.085** | $0.004 | **17 s** | **15/15** | **15/15** (7.3k tokens) |
 | + jevgrep | 166k | 4 | 1 | 2 | $0.111 | $0.026 | 30 s | 13/15 | 13/15 (14.8k tokens) |
 | + ttsc | 116k | 3 | 2 | 2 | $0.104 | – | 29 s | 14/15 | 8/15 (0.7k tokens) |
 
-These are the guided arms: each tool with one system-prompt line saying to call it first, the same sentence for all three (for jevgrep, on top of its own skill). Repository searches are Read, Grep and Glob inside the repository plus shell searches (`grep`, `find`) in the jevgrep arm, the only one with Bash. The last column scores the tool's first answer alone, before the agent did anything else: JevTrace and jevgrep return code, ttsc returns compiler-resolved names, locations and edges without source, so it names fewer declarations in fewer tokens and leaves the reading to the agent.
-
-Without the instruction line (medians):
-
-| Arm | Agent tokens | Repository searches | Sessions that never called the tool | API cost | Labelled code in final answer |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| + JevTrace | 120k | 4 | 2 of 5 | $0.103 | 13/15 |
-| + jevgrep (with its skill) | 150k | 4 | 3 of 5 | $0.089 | 12/15 |
-| + ttsc | 206k | 6 | 0 of 5 | $0.143 | 14/15 |
-
-Per-task rows, means and every session's stream are in `benchmarks/results/agent/` (`report.json`).
+Repository searches are Read, Grep and Glob inside the repository, plus shell searches (`grep`, `find`) in the jevgrep arms, the only ones with Bash. The last column scores the tool's first answer alone, before the agent did anything else: JevTrace and jevgrep return code, ttsc returns compiler-resolved names, locations and edges without source, so it names fewer declarations in fewer tokens and leaves the reading to the agent. Per-task rows, means and every session's stream are in `benchmarks/results/agent/` (`report.json`).
 
 What the pilot shows:
 
-- **JevTrace answered 4 of 5 tasks with one call and no repository search** (40k–72k tokens against the baseline's 89k–263k), and its first answer already named every labelled declaration.
-- **jevgrep's first answer also carried most of the needed code (13/15), but at twice JevTrace's size**, because it prints source without a budget by default (15k–20k tokens per search on Hono and Ky, 78 KB on ky; 4k on the small jevgrep core). Claude Code saves an output that large to a file, and the agent read the file back and then searched further, so sessions ran longer than the baseline. Its own Jev cost was about seven times JevTrace's.
-- **ttsc returned the smallest answers** (under 1k tokens) and named about half the labelled declarations up front; the agent then read the files it pointed to. Guided, that stayed below the baseline in calls but not in tokens at the median.
-- **Tokens fell further than cost.** Most of the tokens a session saves are cache reads of the growing conversation, the cheapest tokens; the system prompt and each new tool output are cache writes, and those stay. For JevTrace, median cost fell 23% while median tokens fell 59%.
-- **Available is not used.** Without the line, the agent skipped JevTrace in 2 of 5 sessions and jevgrep in 3 of 5, even with jevgrep's skill (which itself says to prefer grep for exact strings); on ky-retry-after the task quotes the header name, so Grep finds it.
+- **About half the tokens, no repository searches.** With JevTrace the median session processed 50k tokens against 97k without a tool (48% fewer) and made no Read, Grep or Glob call; 3 of 5 tasks were answered from JevTrace's single answer alone. It was not better on every task: on hono-thrown-http-response the agent searched four more times after JevTrace's answer and used more tokens than without it (163k vs 89k).
+- **Tokens are not cost.** API cost did not fall with tokens: the median was higher with JevTrace unguided ($0.112 vs $0.079) and lower guided ($0.085). Most of the tokens a session saves are cache reads of the growing conversation, the cheapest tokens (about $0.2 per million here); a tool's answer is new content written to the cache (about $4 per million), and every session starts by writing the system prompt and tool definitions. That holds for every tool here, and more for jevgrep, whose answers are twice JevTrace's size. These short find-the-code tasks cost about $0.1; a cost saving would have to be measured on longer tasks that edit and test.
+- **jevgrep's first answer also carried most of the needed code (13/15), but at twice JevTrace's size**, because it prints source without a budget by default (15k–20k tokens per search on Hono and Ky, 78 KB on ky; 4k on the small jevgrep core). Claude Code saves an output that large to a file, and the agent read the file back and then searched further. Its own Jev cost was about seven times JevTrace's.
+- **ttsc returned the smallest answers** (under 1k tokens) and named about half the labelled declarations up front; the agent then read the files it pointed to.
+- **Whether the agent calls the tool depends on its instructions.** With JevTrace's earlier server instructions, which told agents to read a file directly when they already knew its name, the agent skipped JevTrace in 2 of 5 sessions (on ky-retry-after the task quotes the header name, so it used Grep and missed two labelled declarations). Those instructions now say to call JevTrace first even when the task names a keyword, function or file, and the unguided rerun called it in 5 of 5. jevgrep was skipped in 3 of 5 sessions even with its skill, which itself says to prefer grep for exact strings.
+
+### How these numbers changed
+
+An earlier version of this page reported 59% fewer tokens (120k to 50k). Two things changed since: the unguided JevTrace arm was rerun after the server instructions above were fixed, and an accidental run of the harness reran the baseline and both JevTrace arms of ky-retry-after and hono-token-clock-skew and cut short the baseline record of hono-request-body-reuse, which was then rerun. The new baseline sessions moved its median from 120k to 97k. Each arm still has one session per task, so single sessions move medians this much.
 
 ### The outlier, and the fix it led to
 
 In the first guided run, hono-request-body-reuse was the most expensive JevTrace session (416k tokens, 10 Grep/Read calls): after JevTrace's answer the agent reread `src/request.ts` and searched the tests. JevTrace's answer was the cause. Jev had scored the right code highly (`#cachedBody` 0.93, `text()` 0.91, `json()` 0.84), but lead diversity skipped `text()` and `json()` because their dependencies overlap `#cachedBody`'s, and filled the slots with two Lambda-adapter `createRequest`s (0.70) that merely did not overlap; their callers, tests and siblings made up about 20 of the 34 symbols returned. The field `#cachedBody` works on (`bodyCache`) was missing, and it was the agent's first search.
 
-Two changes followed: a lead scored more than 0.1 above a diverse one now takes the slot first, and a method's instance fields (`this.bodyCache`, `const { bodyCache } = this`) are followed as dependencies. The answer became four `src/request.ts` leads with the class fields, its outline and the matching tests, in 2.9k instead of 3.6k tokens; the retrieval benchmark stayed at 98.2%. Rerun, the guided session took 40k tokens, no Grep/Read, 19 s and $0.073. The tables use the rerun for the two JevTrace arms of this task; the other four tasks' JevTrace sessions ran on the build before the fix.
+Two changes followed: a lead scored more than 0.1 above a diverse one now takes the slot first, and a method's instance fields (`this.bodyCache`, `const { bodyCache } = this`) are followed as dependencies. The answer became four `src/request.ts` leads with the class fields, its outline and the matching tests, in 2.9k instead of 3.6k tokens; the retrieval benchmark stayed at 98.2%. Rerun, the guided session took 40k tokens, no Grep/Read, 19 s and $0.073. In the tables, every unguided JevTrace session and the guided sessions of hono-request-body-reuse, ky-retry-after and hono-token-clock-skew ran on the build with this fix; the guided sessions of hono-thrown-http-response and jevgrep-cache-validation ran before it.
 
 ## Method
 

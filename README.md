@@ -33,7 +33,7 @@ In Claude Code (searches whichever project you open; uses the provider saved by 
 claude mcp add jevtrace --scope user -- node /path/to/JevTrace/dist/cli.js
 ```
 
-Agents often grep first even with JevTrace available; in the benchmark this line in `CLAUDE.md` made the difference:
+JevTrace's server instructions ask agents to call it before searching (in the agent benchmark, Claude Code did in 5 of 5 tasks). If yours still greps first, add this line to `CLAUDE.md`:
 
 ```
 To find the code a task needs, call mcp__jevtrace__retrieve_dependency_context with the task before using Grep, Glob or Read, then read only what its result did not cover.

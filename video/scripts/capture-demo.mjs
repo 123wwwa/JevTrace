@@ -87,10 +87,11 @@ const agent = readReport(path.join(projectRoot, 'benchmarks', 'results', 'agent'
 const retrieval = readReport(path.join(projectRoot, 'benchmarks', 'results', 'competitor', 'report.json'));
 if (agent && retrieval) {
   // Agent context: total tokens a Claude Code session processed for the task, with no context tool vs with
-  // JevTrace (told to call it first), median over the agent benchmark's tasks.
+  // JevTrace, median over the agent benchmark's tasks.
   const sessions = arm => agent.rows.filter(row => row.arm === arm);
   const without = sessions('baseline');
-  const withJevtrace = sessions('jevtrace-guided');
+  // The default setup: JevTrace registered, no extra instruction (the server's own instructions make agents call it first).
+  const withJevtrace = sessions('jevtrace');
   // Needed code found: share of each task's labelled declarations JevTrace delivered, mean over the tasks.
   const ours = retrieval.rows.filter(row => row.tool === 'jevtrace');
   const metrics = {
