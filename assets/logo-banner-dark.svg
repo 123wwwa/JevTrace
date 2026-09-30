@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" role="img" aria-label="JevTrace — compiler-guided context for TypeScript/JavaScript: AST, types and deps in; context, symbols and agent-ready code out">
+<style>text{font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}</style>
+<rect x="0.5" y="0.5" width="959" height="299" rx="18" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="44" y="152" font-size="78" font-weight="800" letter-spacing="-2" fill="#ffffff">JevTrace</text>
+<text x="46" y="194" font-size="21" font-weight="600" fill="#c3c2b7">Compiler-guided context</text>
+<text x="46" y="222" font-size="21" font-weight="600" fill="#c3c2b7">for <tspan fill="#3987e5">TypeScript/JavaScript</tspan>.</text>
+<path d="M604 90C648 90 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
+<circle cx="604" cy="90" r="4" fill="#5b5a55"/>
+<path d="M700 150C760 150 756 90 800 90" fill="none" stroke="#3987e5" stroke-width="2"/>
+<circle cx="800" cy="90" r="4" fill="#3987e5"/>
+<path d="M604 150C648 150 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
+<circle cx="604" cy="150" r="4" fill="#5b5a55"/>
+<path d="M700 150C760 150 756 150 800 150" fill="none" stroke="#3987e5" stroke-width="2"/>
+<circle cx="800" cy="150" r="4" fill="#3987e5"/>
+<path d="M604 210C648 210 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
+<circle cx="604" cy="210" r="4" fill="#5b5a55"/>
+<path d="M700 150C760 150 756 210 800 210" fill="none" stroke="#3987e5" stroke-width="2"/>
+<circle cx="800" cy="210" r="4" fill="#3987e5"/>
+<circle cx="700" cy="150" r="52" fill="#3987e5" opacity="0.16"/>
+<circle cx="700" cy="150" r="40" fill="#3987e5"/>
+<g fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M700 166H689a3 3 0 0 1-3-3V135a3 3 0 0 1 3-3h13l8 8v8"/><path d="M694 145l-3 4 3 4M702 145l3 4-3 4"/><circle cx="709" cy="158" r="5"/><path d="M713 162l4 4"/></g>
+<rect x="462" y="67" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><rect x="476" y="78" width="24" height="24" rx="5" fill="#3987e5"/><text x="488" y="95" class="mono" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">TS</text><text x="512" y="96" class="mono" font-size="17" font-weight="700" fill="#ffffff">AST</text>
+<rect x="462" y="127" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><rect x="476" y="138" width="24" height="24" rx="5" fill="#5b5a55"/><text x="488" y="155" class="mono" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">JS</text><text x="512" y="156" class="mono" font-size="17" font-weight="700" fill="#ffffff">types</text>
+<rect x="462" y="187" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M483 204l-6 6 6 6M493 204l6 6-6 6M490 201l-4 18"/></g><text x="512" y="216" class="mono" font-size="17" font-weight="700" fill="#ffffff">deps</text>
+<rect x="800" y="67" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="818" y="80" width="16" height="20" rx="3"/><path d="M822 86h8M822 90h8M822 94h5"/></g><text x="850" y="96" class="mono" font-size="17" font-weight="700" fill="#ffffff">context</text>
+<rect x="800" y="127" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round"><path d="M824.5 146.5l-5 8M827.5 146.5l5 8"/><circle cx="826" cy="143" r="3"/><circle cx="818.5" cy="157" r="3"/><circle cx="833.5" cy="157" r="3"/></g><text x="850" y="156" class="mono" font-size="17" font-weight="700" fill="#ffffff">symbols</text>
+<rect x="800" y="187" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="817" y="205" width="18" height="14" rx="4"/><path d="M826 205V201M815 211v3M837 211v3"/><circle cx="826" cy="200.5" r="1.2" fill="#3987e5"/></g><circle cx="823" cy="211" r="1.5" fill="#3987e5"/><circle cx="829" cy="211" r="1.5" fill="#3987e5"/><text x="850" y="216" class="mono" font-size="17" font-weight="700" fill="#ffffff">agent</text>
+</svg>
