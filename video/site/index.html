@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JevTrace in 30 seconds</title>
+  <meta name="description" content="JevTrace finds the JS/TS code a coding task needs: Jev picks the relevant symbols, the TypeScript compiler follows what is connected.">
+  <meta property="og:title" content="JevTrace in 30 seconds">
+  <meta property="og:description" content="Jev + TypeScript compiler for coding-agent context. MCP · JS/TS · Open source.">
+  <meta property="og:image" content="poster.png">
+  <style>
+    :root { color-scheme: dark; --bg: #0a0c10; --card: #141821; --line: #262b36; --ink: #f5f5f2; --ink2: #c3c2b7; --muted: #8d8b85; --accent: #3987e5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 48px; display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 40px; align-items: center; }
+    .player { position: relative; }
+    video { width: 100%; aspect-ratio: 9 / 16; border-radius: 20px; border: 1px solid var(--line); background: var(--card); display: block; }
+    .sound { position: absolute; top: 14px; right: 14px; font: 600 14px system-ui, sans-serif; color: #fff; background: rgba(10,12,16,0.72); border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; cursor: pointer; }
+    .sound:hover { border-color: var(--accent); }
+    .sound[hidden] { display: none; }
+    h1 { font-size: 44px; line-height: 1.1; margin: 0 0 12px; letter-spacing: -1px; }
+    h1 span { color: var(--accent); }
+    p { color: var(--ink2); margin: 0 0 16px; }
+    .numbers { display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0; }
+    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 18px; min-width: 150px; }
+    .stat b { display: block; font-size: 30px; color: var(--accent); }
+    .stat small { color: var(--muted); }
+    .links { display: flex; gap: 12px; flex-wrap: wrap; }
+    .links a { color: var(--ink); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 8px 16px; }
+    .links a:hover { border-color: var(--accent); }
+    .links a.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
+    @media (max-width: 760px) { main { grid-template-columns: 1fr; } h1 { font-size: 34px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="player">
+      <video id="video" src="jevtrace.mp4" poster="poster.png" autoplay muted loop playsinline controls></video>
+      <!-- Browsers only autoplay muted video; the narration needs one click. -->
+      <button class="sound" id="sound" type="button">Sound on</button>
+    </div>
+    <section>
+      <h1>Jev<span>Trace</span></h1>
+      <p>Give a coding agent the task, not a file. Jev picks the declarations that matter; the TypeScript compiler follows their callers, callees, types and tests; the agent gets one bounded context packet.</p>
+      <div class="numbers">
+        <div class="stat"><b>59%</b><small>less context a coding<br>agent reads</small></div>
+        <div class="stat"><b>0</b><small>repository searches<br>(6 without)</small></div>
+        <div class="stat"><b>98%</b><small>of the code a task<br>needs, found</small></div>
+      </div>
+      <div class="links">
+        <a class="primary" href="https://github.com/123wwwa/JevTrace">GitHub</a>
+        <a href="https://github.com/123wwwa/JevTrace/blob/main/docs/agent-benchmark.md">Benchmark</a>
+        <a href="jevtrace.mp4" download>Download MP4</a>
+      </div>
+      <footer>Less context: the same Claude Code agent with and without JevTrace, median over 5 JS/TS tasks (a pilot). Code found: 98.2% of the labelled declarations across 19 JS/TS tasks. Labels written by the JevTrace authors. The video's graph is a recorded JevTrace run on hono (2026-09-30).</footer>
+    </section>
+  </main>
+  <script>
+    const video = document.getElementById('video');
+    const sound = document.getElementById('sound');
+    sound.addEventListener('click', () => { video.muted = false; video.currentTime = 0; video.play(); });
+    video.addEventListener('volumechange', () => { sound.hidden = !video.muted; });
+  </script>
+</body>
+</html>
