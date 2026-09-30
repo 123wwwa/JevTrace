@@ -1,28 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" role="img" aria-label="JevTrace — compiler-guided context for TypeScript/JavaScript: AST, types and deps in; context, symbols and agent-ready code out">
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="300" viewBox="0 0 960 300" role="img" aria-label="JevTrace — compiler-guided context for TypeScript/JavaScript. 1. Task: describe the change in plain language. 2. Trace: the TypeScript compiler follows callers, types, calls and tests while Jev drops irrelevant code. 3. Context: the kept code is returned within the token budget.">
 <style>text{font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}</style>
 <rect x="0.5" y="0.5" width="959" height="299" rx="18" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
-<text x="44" y="152" font-size="78" font-weight="800" letter-spacing="-2" fill="#ffffff">JevTrace</text>
-<text x="46" y="194" font-size="21" font-weight="600" fill="#c3c2b7">Compiler-guided context</text>
-<text x="46" y="222" font-size="21" font-weight="600" fill="#c3c2b7">for <tspan fill="#3987e5">TypeScript/JavaScript</tspan>.</text>
-<path d="M604 90C648 90 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
-<circle cx="604" cy="90" r="4" fill="#5b5a55"/>
-<path d="M700 150C760 150 756 90 800 90" fill="none" stroke="#3987e5" stroke-width="2"/>
-<circle cx="800" cy="90" r="4" fill="#3987e5"/>
-<path d="M604 150C648 150 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
-<circle cx="604" cy="150" r="4" fill="#5b5a55"/>
-<path d="M700 150C760 150 756 150 800 150" fill="none" stroke="#3987e5" stroke-width="2"/>
-<circle cx="800" cy="150" r="4" fill="#3987e5"/>
-<path d="M604 210C648 210 640 150 700 150" fill="none" stroke="#5b5a55" stroke-width="2"/>
-<circle cx="604" cy="210" r="4" fill="#5b5a55"/>
-<path d="M700 150C760 150 756 210 800 210" fill="none" stroke="#3987e5" stroke-width="2"/>
-<circle cx="800" cy="210" r="4" fill="#3987e5"/>
-<circle cx="700" cy="150" r="52" fill="#3987e5" opacity="0.16"/>
-<circle cx="700" cy="150" r="40" fill="#3987e5"/>
-<g fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M700 166H689a3 3 0 0 1-3-3V135a3 3 0 0 1 3-3h13l8 8v8"/><path d="M694 145l-3 4 3 4M702 145l3 4-3 4"/><circle cx="709" cy="158" r="5"/><path d="M713 162l4 4"/></g>
-<rect x="462" y="67" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><rect x="476" y="78" width="24" height="24" rx="5" fill="#3987e5"/><text x="488" y="95" class="mono" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">TS</text><text x="512" y="96" class="mono" font-size="17" font-weight="700" fill="#ffffff">AST</text>
-<rect x="462" y="127" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><rect x="476" y="138" width="24" height="24" rx="5" fill="#5b5a55"/><text x="488" y="155" class="mono" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">JS</text><text x="512" y="156" class="mono" font-size="17" font-weight="700" fill="#ffffff">types</text>
-<rect x="462" y="187" width="142" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M483 204l-6 6 6 6M493 204l6 6-6 6M490 201l-4 18"/></g><text x="512" y="216" class="mono" font-size="17" font-weight="700" fill="#ffffff">deps</text>
-<rect x="800" y="67" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="818" y="80" width="16" height="20" rx="3"/><path d="M822 86h8M822 90h8M822 94h5"/></g><text x="850" y="96" class="mono" font-size="17" font-weight="700" fill="#ffffff">context</text>
-<rect x="800" y="127" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round"><path d="M824.5 146.5l-5 8M827.5 146.5l5 8"/><circle cx="826" cy="143" r="3"/><circle cx="818.5" cy="157" r="3"/><circle cx="833.5" cy="157" r="3"/></g><text x="850" y="156" class="mono" font-size="17" font-weight="700" fill="#ffffff">symbols</text>
-<rect x="800" y="187" width="128" height="46" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/><g fill="none" stroke="#3987e5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="817" y="205" width="18" height="14" rx="4"/><path d="M826 205V201M815 211v3M837 211v3"/><circle cx="826" cy="200.5" r="1.2" fill="#3987e5"/></g><circle cx="823" cy="211" r="1.5" fill="#3987e5"/><circle cx="829" cy="211" r="1.5" fill="#3987e5"/><text x="850" y="216" class="mono" font-size="17" font-weight="700" fill="#ffffff">agent</text>
+<text x="42" y="150" font-size="70" font-weight="800" letter-spacing="-2" fill="#ffffff">JevTrace</text>
+<text x="44" y="188" font-size="19" font-weight="600" fill="#c3c2b7">Compiler-guided context</text>
+<text x="44" y="214" font-size="19" font-weight="600" fill="#c3c2b7">for <tspan fill="#3987e5">TypeScript/JavaScript</tspan>.</text>
+<circle cx="401" cy="62" r="9" fill="#3987e5"/><text x="401" y="66.5" font-size="12" font-weight="800" fill="#ffffff" text-anchor="middle">1</text><text x="416" y="67" font-size="15" font-weight="700" fill="#ffffff">Task</text>
+<rect x="392" y="96" width="118" height="128" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/>
+<text x="406" y="120" font-size="10" font-weight="800" letter-spacing="1.5" fill="#3987e5">TASK</text>
+<text class="mono" x="406" y="150" font-size="14" font-weight="700" fill="#ffffff">“Fix refresh</text>
+<text class="mono" x="406" y="170" font-size="14" font-weight="700" fill="#ffffff">token</text>
+<text class="mono" x="406" y="190" font-size="14" font-weight="700" fill="#ffffff">validation”</text>
+<text x="392" y="270" font-size="13" font-weight="500" fill="#898781">plain language</text>
+<path d="M514 160H546" stroke="#5b5a55" stroke-width="2"/><path d="M541 155l6 5-6 5" fill="none" stroke="#5b5a55" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="557" cy="62" r="9" fill="#3987e5"/><text x="557" y="66.5" font-size="12" font-weight="800" fill="#ffffff" text-anchor="middle">2</text><text x="572" y="67" font-size="15" font-weight="700" fill="#ffffff">Trace</text>
+<path d="M662 160L590 104" stroke="#3987e5" stroke-width="1.5"/>
+<path d="M662 160L750 104" stroke="#3987e5" stroke-width="1.5"/>
+<path d="M662 160L590 216" stroke="#3987e5" stroke-width="1.5"/>
+<path d="M662 160L750 216" stroke="#3987e5" stroke-width="1.5"/>
+<path d="M662 160L752 160" stroke="#5b5a55" stroke-width="1.5" stroke-dasharray="3 4"/>
+<rect x="619.4" y="144" width="85.2" height="32" rx="16" fill="#3987e5"/>
+<text class="mono" x="662" y="165" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">verify()</text>
+<rect x="547.7" y="91" width="84.60000000000001" height="26" rx="13" fill="#232322" stroke="#3987e5" stroke-width="1.5"/>
+<text class="mono" x="590" y="108.5" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">refresh()</text>
+<text x="590" y="85" font-size="11" font-weight="600" fill="#898781" text-anchor="middle">caller</text>
+<rect x="722.5" y="91" width="55" height="26" rx="13" fill="#232322" stroke="#3987e5" stroke-width="1.5"/>
+<text class="mono" x="750" y="108.5" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">Token</text>
+<text x="750" y="85" font-size="11" font-weight="600" fill="#898781" text-anchor="middle">type</text>
+<rect x="547.7" y="203" width="84.60000000000001" height="26" rx="13" fill="#232322" stroke="#3987e5" stroke-width="1.5"/>
+<text class="mono" x="590" y="220.5" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">auth.test</text>
+<text x="590" y="244" font-size="11" font-weight="600" fill="#898781" text-anchor="middle">test</text>
+<rect x="718.8" y="203" width="62.400000000000006" height="26" rx="13" fill="#232322" stroke="#3987e5" stroke-width="1.5"/>
+<text class="mono" x="750" y="220.5" font-size="12" font-weight="700" fill="#ffffff" text-anchor="middle">sign()</text>
+<text x="750" y="244" font-size="11" font-weight="600" fill="#898781" text-anchor="middle">calls</text>
+<rect x="724.5" y="147" width="55" height="26" rx="13" fill="#1a1a19" stroke="#5b5a55" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text class="mono" x="752" y="164.5" font-size="12" font-weight="700" fill="#898781" text-anchor="middle" text-decoration="line-through">log()</text>
+<text x="548" y="270" font-size="13" font-weight="500" fill="#898781">compiler follows links · Jev drops noise</text>
+<path d="M790 160H824" stroke="#5b5a55" stroke-width="2"/><path d="M819 155l6 5-6 5" fill="none" stroke="#5b5a55" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="835" cy="62" r="9" fill="#3987e5"/><text x="835" y="66.5" font-size="12" font-weight="800" fill="#ffffff" text-anchor="middle">3</text><text x="850" y="67" font-size="15" font-weight="700" fill="#ffffff">Context</text>
+<rect x="826" y="96" width="104" height="128" rx="10" fill="#232322" stroke="rgba(255,255,255,0.10)"/>
+<rect x="838" y="112" width="46" height="6" rx="3" fill="#3987e5"/>
+<rect x="846" y="123" width="64" height="5" rx="2.5" fill="#5b5a55"/>
+<rect x="838" y="138" width="34" height="6" rx="3" fill="#3987e5"/>
+<rect x="846" y="149" width="56" height="5" rx="2.5" fill="#5b5a55"/>
+<rect x="838" y="164" width="52" height="6" rx="3" fill="#3987e5"/>
+<rect x="846" y="175" width="44" height="5" rx="2.5" fill="#5b5a55"/>
+<rect x="838" y="194" width="80" height="6" rx="3" fill="#2c2c2a"/>
+<rect x="838" y="194" width="33.6" height="6" rx="3" fill="#3987e5"/>
+<text class="mono" x="838" y="214" font-size="10.5" font-weight="700" fill="#c3c2b7">3.4k / 8k tok</text>
+<text x="826" y="270" font-size="13" font-weight="500" fill="#898781">within budget</text>
 </svg>

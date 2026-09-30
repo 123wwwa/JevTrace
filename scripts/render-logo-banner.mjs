@@ -1,5 +1,7 @@
 // Renders the README logo banner (light and dark SVG) with the same palette as the benchmark card
 // and the same typefaces as the intro video (Inter for text, JetBrains Mono for code terms).
+// The diagram walks through one query: a task goes in, the compiler traces the code it touches
+// while Jev drops what is irrelevant, and the kept code comes back within the token budget.
 //   node scripts/render-logo-banner.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-// Same tokens as scripts/render-benchmark-card.mjs, plus a card fill for the node boxes.
+// Same tokens as scripts/render-benchmark-card.mjs, plus a card fill for the boxes.
 const themes = {
   light: { bg: '#fcfcfb', card: '#ffffff', ink: '#0b0b0b', ink2: '#52514e', muted: '#898781', grid: '#e1e0d9', accent: '#2a78d6', gray: '#b9b7b0', border: 'rgba(11,11,11,0.10)', onAccent: '#ffffff' },
   dark: { bg: '#1a1a19', card: '#232322', ink: '#ffffff', ink2: '#c3c2b7', muted: '#898781', grid: '#2c2c2a', accent: '#3987e5', gray: '#5b5a55', border: 'rgba(255,255,255,0.10)', onAccent: '#ffffff' },
@@ -17,65 +19,97 @@ const mono = `"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monosp
 
 const width = 960;
 const height = 300;
-const hub = { x: 700, y: 150, r: 40 };
-const rows = [90, 150, 210];
-const cardH = 46;
-const inX = 462;
-const inW = 142;
-const outX = 800;
-const outW = 128;
+const midY = 160;
+// Three steps, left to right: [x, width].
+const task = [392, 118];
+const trace = [548, 242];
+const context = [826, 104];
+const box = { top: 96, h: 128 };
 
-// 24px line icons, drawn at (x, y) = top-left.
-const icons = {
-  ts: (t, x, y) => `<rect x="${x}" y="${y}" width="24" height="24" rx="5" fill="${t.accent}"/><text x="${x + 12}" y="${y + 17}" class="mono" font-size="12" font-weight="700" fill="${t.onAccent}" text-anchor="middle">TS</text>`,
-  js: (t, x, y) => `<rect x="${x}" y="${y}" width="24" height="24" rx="5" fill="${t.gray}"/><text x="${x + 12}" y="${y + 17}" class="mono" font-size="12" font-weight="700" fill="${t.ink}" text-anchor="middle">JS</text>`,
-  deps: (t, x, y) => `<g fill="none" stroke="${t.accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M${x + 7} ${y + 6}l-6 6 6 6M${x + 17} ${y + 6}l6 6-6 6M${x + 14} ${y + 3}l-4 18"/></g>`,
-  context: (t, x, y) => `<g fill="none" stroke="${t.accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="${x + 4}" y="${y + 2}" width="16" height="20" rx="3"/><path d="M${x + 8} ${y + 8}h8M${x + 8} ${y + 12}h8M${x + 8} ${y + 16}h5"/></g>`,
-  symbols: (t, x, y) => `<g fill="none" stroke="${t.accent}" stroke-width="2" stroke-linecap="round"><path d="M${x + 10.5} ${y + 8.5}l-5 8M${x + 13.5} ${y + 8.5}l5 8"/><circle cx="${x + 12}" cy="${y + 5}" r="3"/><circle cx="${x + 4.5}" cy="${y + 19}" r="3"/><circle cx="${x + 19.5}" cy="${y + 19}" r="3"/></g>`,
-  agent: (t, x, y) => `<g fill="none" stroke="${t.accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="${x + 3}" y="${y + 7}" width="18" height="14" rx="4"/><path d="M${x + 12} ${y + 7}V${y + 3}M${x + 1} ${y + 13}v3M${x + 23} ${y + 13}v3"/><circle cx="${x + 12}" cy="${y + 2.5}" r="1.2" fill="${t.accent}"/></g><circle cx="${x + 9}" cy="${y + 13}" r="1.5" fill="${t.accent}"/><circle cx="${x + 15}" cy="${y + 13}" r="1.5" fill="${t.accent}"/>`,
-};
-const inputs = [['ts', 'AST'], ['js', 'types'], ['deps', 'deps']];
-const outputs = [['context', 'context'], ['symbols', 'symbols'], ['agent', 'agent']];
+// Code graph for step 2. rel = how the compiler reached it; drop = judged irrelevant by Jev.
+const hub = { x: 662, name: 'verify()' };
+const nodes = [
+  { x: 590, y: 104, name: 'refresh()', rel: 'caller' },
+  { x: 750, y: 104, name: 'Token', rel: 'type' },
+  { x: 590, y: 216, name: 'auth.test', rel: 'test' },
+  { x: 750, y: 216, name: 'sign()', rel: 'calls' },
+  { x: 752, y: midY, name: 'log()', drop: true },
+];
+const pillW = name => name.length * 7.4 + 18;
 
-function card(t, x, w, y, icon, label) {
-  const top = y - cardH / 2;
-  return [
-    `<rect x="${x}" y="${top}" width="${w}" height="${cardH}" rx="10" fill="${t.card}" stroke="${t.border}"/>`,
-    icons[icon](t, x + 14, y - 12),
-    `<text x="${x + 50}" y="${y + 6}" class="mono" font-size="17" font-weight="700" fill="${t.ink}">${label}</text>`,
-  ].join('');
+const esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+function step(t, x, n, title) {
+  return `<circle cx="${x + 9}" cy="62" r="9" fill="${t.accent}"/><text x="${x + 9}" y="66.5" font-size="12" font-weight="800" fill="${t.onAccent}" text-anchor="middle">${n}</text>`
+    + `<text x="${x + 24}" y="67" font-size="15" font-weight="700" fill="${t.ink}">${title}</text>`;
 }
+const caption = (t, x, text) => `<text x="${x}" y="270" font-size="13" font-weight="500" fill="${t.muted}">${esc(text)}</text>`;
+const arrow = (t, x0, x1) => `<path d="M${x0} ${midY}H${x1 - 2}" stroke="${t.gray}" stroke-width="2"/><path d="M${x1 - 7} ${midY - 5}l6 5-6 5" fill="none" stroke="${t.gray}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
 
 function render(theme) {
   const t = themes[theme];
   const parts = [];
-  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="JevTrace — compiler-guided context for TypeScript/JavaScript: AST, types and deps in; context, symbols and agent-ready code out">`);
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="JevTrace — compiler-guided context for TypeScript/JavaScript. 1. Task: describe the change in plain language. 2. Trace: the TypeScript compiler follows callers, types, calls and tests while Jev drops irrelevant code. 3. Context: the kept code is returned within the token budget.">`);
   parts.push(`<style>text{font-family:${sans}}.mono{font-family:${mono}}</style>`);
   parts.push(`<rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="18" fill="${t.bg}" stroke="${t.border}"/>`);
 
   // Wordmark and tagline.
-  parts.push(`<text x="44" y="152" font-size="78" font-weight="800" letter-spacing="-2" fill="${t.ink}">JevTrace</text>`);
-  parts.push(`<text x="46" y="194" font-size="21" font-weight="600" fill="${t.ink2}">Compiler-guided context</text>`);
-  parts.push(`<text x="46" y="222" font-size="21" font-weight="600" fill="${t.ink2}">for <tspan fill="${t.accent}">TypeScript/JavaScript</tspan>.</text>`);
+  parts.push(`<text x="42" y="150" font-size="70" font-weight="800" letter-spacing="-2" fill="${t.ink}">JevTrace</text>`);
+  parts.push(`<text x="44" y="188" font-size="19" font-weight="600" fill="${t.ink2}">Compiler-guided context</text>`);
+  parts.push(`<text x="44" y="214" font-size="19" font-weight="600" fill="${t.ink2}">for <tspan fill="${t.accent}">TypeScript/JavaScript</tspan>.</text>`);
 
-  // Connectors run into the hub centre and are covered by it; inputs gray, outputs accent (as in the card legend).
-  for (const y of rows) {
-    const x0 = inX + inW;
-    parts.push(`<path d="M${x0} ${y}C${x0 + 44} ${y} ${hub.x - 60} ${hub.y} ${hub.x} ${hub.y}" fill="none" stroke="${t.gray}" stroke-width="2"/>`);
-    parts.push(`<circle cx="${x0}" cy="${y}" r="4" fill="${t.gray}"/>`);
-    parts.push(`<path d="M${hub.x} ${hub.y}C${hub.x + 60} ${hub.y} ${outX - 44} ${y} ${outX} ${y}" fill="none" stroke="${t.accent}" stroke-width="2"/>`);
-    parts.push(`<circle cx="${outX}" cy="${y}" r="4" fill="${t.accent}"/>`);
+  // 1. Task — the input is a sentence, not a file path.
+  const [tx, tw] = task;
+  parts.push(step(t, tx, 1, 'Task'));
+  parts.push(`<rect x="${tx}" y="${box.top}" width="${tw}" height="${box.h}" rx="10" fill="${t.card}" stroke="${t.border}"/>`);
+  parts.push(`<text x="${tx + 14}" y="${box.top + 24}" font-size="10" font-weight="800" letter-spacing="1.5" fill="${t.accent}">TASK</text>`);
+  ['“Fix refresh', 'token', 'validation”'].forEach((line, i) => {
+    parts.push(`<text class="mono" x="${tx + 14}" y="${box.top + 54 + i * 20}" font-size="14" font-weight="700" fill="${t.ink}">${esc(line)}</text>`);
+  });
+  parts.push(caption(t, tx, 'plain language'));
+  parts.push(arrow(t, tx + tw + 4, trace[0]));
+
+  // 2. Trace — edges first so the pills sit on top of them.
+  const [gx] = trace;
+  parts.push(step(t, gx, 2, 'Trace'));
+  for (const node of nodes) {
+    parts.push(node.drop
+      ? `<path d="M${hub.x} ${midY}L${node.x} ${node.y}" stroke="${t.gray}" stroke-width="1.5" stroke-dasharray="3 4"/>`
+      : `<path d="M${hub.x} ${midY}L${node.x} ${node.y}" stroke="${t.accent}" stroke-width="1.5"/>`);
   }
+  const hubW = pillW(hub.name) + 8;
+  parts.push(`<rect x="${hub.x - hubW / 2}" y="${midY - 16}" width="${hubW}" height="32" rx="16" fill="${t.accent}"/>`);
+  parts.push(`<text class="mono" x="${hub.x}" y="${midY + 5}" font-size="13" font-weight="700" fill="${t.onAccent}" text-anchor="middle">${hub.name}</text>`);
+  for (const node of nodes) {
+    const w = pillW(node.name);
+    const fill = node.drop ? t.bg : t.card;
+    const stroke = node.drop ? t.gray : t.accent;
+    const dash = node.drop ? ' stroke-dasharray="3 3"' : '';
+    parts.push(`<rect x="${node.x - w / 2}" y="${node.y - 13}" width="${w}" height="26" rx="13" fill="${fill}" stroke="${stroke}" stroke-width="1.5"${dash}/>`);
+    parts.push(`<text class="mono" x="${node.x}" y="${node.y + 4.5}" font-size="12" font-weight="700" fill="${node.drop ? t.muted : t.ink}" text-anchor="middle"${node.drop ? ' text-decoration="line-through"' : ''}>${node.name}</text>`);
+    if (node.rel) {
+      const above = node.y < midY;
+      parts.push(`<text x="${node.x}" y="${above ? node.y - 19 : node.y + 28}" font-size="11" font-weight="600" fill="${t.muted}" text-anchor="middle">${node.rel}</text>`);
+    }
+  }
+  parts.push(caption(t, gx, 'compiler follows links · Jev drops noise'));
+  parts.push(arrow(t, trace[0] + trace[1], context[0]));
 
-  // Hub: accent disc with a soft halo and a "code file + search" glyph.
-  parts.push(`<circle cx="${hub.x}" cy="${hub.y}" r="${hub.r + 12}" fill="${t.accent}" opacity="0.16"/>`);
-  parts.push(`<circle cx="${hub.x}" cy="${hub.y}" r="${hub.r}" fill="${t.accent}"/>`);
-  const gx = hub.x - 14;
-  const gy = hub.y - 18;
-  parts.push(`<g fill="none" stroke="${t.onAccent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M${gx + 14} ${gy + 34}H${gx + 3}a3 3 0 0 1-3-3V${gy + 3}a3 3 0 0 1 3-3h13l8 8v8"/><path d="M${gx + 8} ${gy + 13}l-3 4 3 4M${gx + 16} ${gy + 13}l3 4-3 4"/><circle cx="${gx + 23}" cy="${gy + 26}" r="5"/><path d="M${gx + 27} ${gy + 30}l4 4"/></g>`);
+  // 3. Context — kept symbols with their bodies, and how much of the budget they use.
+  const [cx, cw] = context;
+  parts.push(step(t, cx, 3, 'Context'));
+  parts.push(`<rect x="${cx}" y="${box.top}" width="${cw}" height="${box.h}" rx="10" fill="${t.card}" stroke="${t.border}"/>`);
+  [0, 1, 2].forEach(i => {
+    const y = box.top + 16 + i * 26;
+    parts.push(`<rect x="${cx + 12}" y="${y}" width="${[46, 34, 52][i]}" height="6" rx="3" fill="${t.accent}"/>`);
+    parts.push(`<rect x="${cx + 20}" y="${y + 11}" width="${[64, 56, 44][i]}" height="5" rx="2.5" fill="${t.gray}"/>`);
+  });
+  const budgetY = box.top + box.h - 30;
+  parts.push(`<rect x="${cx + 12}" y="${budgetY}" width="${cw - 24}" height="6" rx="3" fill="${t.grid}"/>`);
+  parts.push(`<rect x="${cx + 12}" y="${budgetY}" width="${(cw - 24) * 0.42}" height="6" rx="3" fill="${t.accent}"/>`);
+  parts.push(`<text class="mono" x="${cx + 12}" y="${budgetY + 20}" font-size="10.5" font-weight="700" fill="${t.ink2}">3.4k / 8k tok</text>`);
+  parts.push(caption(t, cx, 'within budget'));
 
-  inputs.forEach(([icon, label], i) => parts.push(card(t, inX, inW, rows[i], icon, label)));
-  outputs.forEach(([icon, label], i) => parts.push(card(t, outX, outW, rows[i], icon, label)));
   parts.push('</svg>');
   return parts.join('\n');
 }
