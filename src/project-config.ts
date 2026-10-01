@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
+import { describeSkipped, readDirectory } from './fs-walk.js';
 
 // Vue components are project sources too, as in vue-tsc: an include pattern such as "src/**/*" lists them.
 const extraFileExtensions: ts.FileExtensionInfo[] = [{ extension: '.vue', isMixedContent: false, scriptKind: ts.ScriptKind.Deferred }];
@@ -13,12 +14,12 @@ export interface ParsedProjectConfig {
   parsed: ts.ParsedCommandLine;
 }
 
-export function discoverProjectConfigs(root: string): string[] {
+export function discoverProjectConfigs(root: string, skipped?: string[]): string[] {
   const resolvedRoot = path.resolve(root);
   const configs: string[] = [];
 
   const walk = (directory: string): void => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of readDirectory(directory, skipped)) {
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!ignoredDirectories.has(entry.name) && !entry.name.startsWith('.')) walk(full);
@@ -36,8 +37,12 @@ export function parseProjectConfigs(root: string): { projects: ParsedProjectConf
   const warnings: string[] = [];
   const projects: ParsedProjectConfig[] = [];
   const withoutBase: string[] = [];
+  const skipped: string[] = [];
+  const configPaths = discoverProjectConfigs(root, skipped);
+  const skippedNote = describeSkipped(path.resolve(root), skipped);
+  if (skippedNote) warnings.push(skippedNote);
 
-  for (const configPath of discoverProjectConfigs(root)) {
+  for (const configPath of configPaths) {
     // TypeScript's config APIs expect '/'-separated paths; a Windows path makes it assert on a parse error.
     const tsPath = configPath.replaceAll('\\', '/');
     let parsed: ts.ParsedCommandLine;

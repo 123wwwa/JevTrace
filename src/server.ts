@@ -11,6 +11,8 @@ import type { TaskPipelineResult } from './task-pipeline.js';
 import { formatContextSavings, RetrievalLatencyWindow, SessionSavings, summarizeContextSavings } from './context-metrics.js';
 import { formatStats } from './stats.js';
 import { appendUsage, jevUsage } from './usage-log.js';
+import { explainError, UserFacingError } from './errors.js';
+import { unsuitableRoot } from './fs-walk.js';
 import type { JudgeCallStats } from './types.js';
 
 // Structured results carry metadata only. Hosts such as Claude Code pass structuredContent to the model
@@ -41,8 +43,24 @@ export function createServer(root = process.cwd()): McpServer {
     instructions: 'JevTrace answers "which code does this JavaScript/TypeScript task involve" in one call. For any task or question about how, where or why something works in this repository, or a change to it, call retrieve_dependency_context with the task before using Grep, Glob or Read, also when the task names a keyword, function or file: the result has that code plus the callers, callees, types and tests the TypeScript compiler links to it, which a keyword search does not find. The code it returns is the current source; work from it and read files only for what it does not show. Describe one behaviour or area per call. When you split a larger request (review everything, fix bugs anywhere, a change touching several features) into subtasks, call it once per subtask, including from subagents; a project-wide request returns suggested per-area subtasks and a repository map instead of code.',
   });
   const projectRoot = path.resolve(root);
-  const adapter = new TypeScriptAdapter(projectRoot);
+  // Built on the first tool call rather than here: an error while reading the project (an unreadable folder,
+  // a broken config) then reaches the agent as a tool error it can show, instead of failing the MCP handshake
+  // with a bare "Internal server error".
+  const unsuitable = unsuitableRoot(projectRoot);
+  let adapter: TypeScriptAdapter | undefined;
+  const project = (): TypeScriptAdapter => {
+    if (unsuitable) throw new UserFacingError(unsuitable);
+    adapter ??= new TypeScriptAdapter(projectRoot);
+    return adapter;
+  };
   const index = new RepositoryIndex(projectRoot);
+  /** The tool result for a failure, also written to stderr, which MCP hosts keep in their logs. */
+  const failure = (tool: string, task: string, error: unknown) => {
+    const text = explainError(error);
+    process.stderr.write(`jevtrace (${tool}): ${text}\n`);
+    appendUsage({ time: new Date().toISOString(), tool: tool as 'retrieve_dependency_context', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 300) });
+    return { isError: true, content: [{ type: 'text' as const, text }] };
+  };
   const retrievalLatencies = new RetrievalLatencyWindow(50);
   const sessionSavings = new SessionSavings();
   let judge: ReturnType<typeof createJudge> | undefined;
@@ -85,7 +103,7 @@ export function createServer(root = process.cwd()): McpServer {
       // Select only what the text can show: a token is estimated as four characters, and headings,
       // relationship labels and the omitted/not-followed lists take roughly 5,000 more.
       const effectiveBudget = Math.max(500, Math.min(tokenBudget, Math.floor((maxChars - 5000) / 4)));
-      const result = await serialize(() => query(index, adapter, judge!, task, undefined, {
+      const result = await serialize(() => query(index, project(), judge!, task, undefined, {
         tokenBudget: effectiveBudget, reverseFanIn,
         maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles,
         perLeadNodeLimit, perLeadTokenBudget, neighborhoodTokenBudget,
@@ -146,9 +164,7 @@ ${result.map}`.slice(0, maxChars);
       return { content: [{ type: 'text', text }],
         structuredContent: { context: text, task, status: result.status, warnings: result.warnings, discovery: compactDiscovery(result.discovery), session: sessionSavings.snapshot() } };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendUsage({ time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: message.slice(0, 300) });
-      return { isError: true, content: [{ type: 'text', text: message }] };
+      return failure('retrieve_dependency_context', task, error);
     }
   });
 
@@ -183,7 +199,7 @@ ${result.map}`.slice(0, maxChars);
       const entryFile = file ?? evidence?.path;
       if (!entryFile || (line === undefined && !lead && !symbol)) throw new Error('Provide an explicit file with line/symbol, or structured evidence with a lead');
       judge ??= createJudge();
-      const result = await serialize(() => query(index, adapter, judge!, task,
+      const result = await serialize(() => query(index, project(), judge!, task,
         { file: entryFile, line: line ?? lead?.range.startLine, endLine: endLine ?? lead?.range.endLine, symbol: symbol ?? lead?.name, score: lead?.score },
         { maxDepth, maxNodes, tokenBudget, bodyThreshold, omitThreshold, visitPolicy, wrapperLookahead, reverse, reverseFanIn, signal: context.mcpReq.signal }));
       appendUsage({ time: new Date().toISOString(), tool: 'retrieve_from_entry', project: projectRoot, task, ok: true, ms: Math.round(performance.now() - started),
@@ -193,9 +209,7 @@ ${result.map}`.slice(0, maxChars);
         structuredContent: { context: text, task, status: result.status, warnings: result.warnings, usedTokens: result.usedTokens, tokenBudget: result.tokenBudget,
           entry: nodeRef(result.entry), items: compactItems(result.items), omittedCount: result.omitted.length } };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendUsage({ time: new Date().toISOString(), tool: 'retrieve_from_entry', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: message.slice(0, 300) });
-      return { isError: true, content: [{ type: 'text', text: message }] };
+      return failure('retrieve_from_entry', task, error);
     }
   });
   server.registerTool('discover_entries', {
@@ -214,7 +228,7 @@ ${result.map}`.slice(0, maxChars);
       const started = performance.now();
       judge ??= createJudge();
       const result = await serialize(() => discoverEntries(index, judge!, task,
-        { maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles, signal: context.mcpReq.signal }, adapter));
+        { maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles, signal: context.mcpReq.signal }, project()));
       appendUsage({ time: new Date().toISOString(), tool: 'discover_entries', project: projectRoot, task, ok: true, ms: Math.round(performance.now() - started),
         outcome: result.status, ...jevUsage(result.judgeStats) });
       const summary = compactDiscovery(result);
@@ -227,9 +241,7 @@ ${result.map}`.slice(0, maxChars);
       ].join('\n');
       return { content: [{ type: 'text', text }], structuredContent: summary };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      appendUsage({ time: new Date().toISOString(), tool: 'discover_entries', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: message.slice(0, 300) });
-      return { isError: true, content: [{ type: 'text', text: message }] };
+      return failure('discover_entries', task, error);
     }
   });
   server.registerTool('usage_stats', {

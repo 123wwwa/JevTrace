@@ -178,7 +178,7 @@ test('a root that does not exist refuses to start and says why on stderr', async
   const client = new Client({ name: 'stdio-test', version: '1.0.0' });
   await assert.rejects(client.connect(transport));
   await client.close().catch(() => {});
-  assert.match(stderr, /project root is not a directory/);
+  assert.match(stderr, /does not exist or is not a folder\. Check the --root you registered/);
 });
 
 test('a malformed tsconfig is skipped instead of breaking server startup', async t => {
@@ -284,4 +284,17 @@ test('structured results stay small: source code is only in the maxChars-bounded
   const discovered = await client.callTool({ name: 'discover_entries', arguments: { task: 'refresh token helper' } });
   assert.ok(text(discovered).length < 5_000);
   assert.match(text(discovered), /call retrieve_dependency_context for the code/);
+});
+
+test('started in the home directory, the server still connects and every tool explains how to fix it', async t => {
+  // What a client passes when the agent was started outside any project. This used to crash the handshake
+  // with a bare "Internal server error" (on macOS, EPERM from ~/Library) before any tool could answer.
+  const { client, stderr } = await connect(t, os.homedir());
+  const { tools } = await client.listTools();
+  assert.ok(tools.some(tool => tool.name === 'retrieve_dependency_context'));
+  const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'Change how retry delays are computed' } });
+  assert.equal(result.isError, true);
+  assert.match(text(result), /started in your home directory .* not in a project/);
+  assert.match(text(result), /--root \/path\/to\/project/);
+  assert.match(stderr(), /jevtrace: JevTrace was started in your home directory/);
 });

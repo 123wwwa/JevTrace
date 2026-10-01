@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks';
 import ts from 'typescript';
 import type { CodeNode, JudgeCallStats, Judgment, LanguageAdapter, RelevanceJudge } from './types.js';
 import { parseProjectConfigs } from './project-config.js';
+import { describeSkipped, readDirectory } from './fs-walk.js';
 import { isVueFile, vueScript } from './vue.js';
 
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo']);
@@ -243,9 +244,10 @@ export class RepositoryIndex {
     let scannedFiles = 0;
     let limitReached: string | undefined;
     const unanalysed: string[] = [];
+    const skippedDirectories: string[] = [];
     const walk = (directory: string): void => {
       signal?.throwIfAborted();
-      for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      for (const entry of readDirectory(directory, skippedDirectories).sort((a, b) => a.name.localeCompare(b.name))) {
         signal?.throwIfAborted();
         if (scannedFiles >= maxFiles) {
           limitReached ??= path.relative(this.root, path.join(directory, entry.name)).replaceAll('\\', '/');
@@ -350,6 +352,8 @@ export class RepositoryIndex {
       }
     };
     walk(root);
+    const skippedNote = describeSkipped(root, skippedDirectories);
+    if (skippedNote) warnings.push(skippedNote);
     if (limitReached) warnings.push(`Discovery file limit reached (${maxFiles} source files): ${limitReached} and later paths (in name order) were not searched; raise maxFiles to search them`);
     for (const file of this.cache.keys()) if (!seen.has(file)) this.cache.delete(file);
     return { nodes, scannedFiles, warnings: unique(warnings), unanalysedFiles: this.withoutIgnored(unanalysed) };

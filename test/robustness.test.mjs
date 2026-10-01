@@ -546,3 +546,47 @@ test('a clearly more relevant lead that overlaps an earlier one beats a diverse 
   assert.deepEqual(adapter.dependencies(cached, { values: true }).edges.map(edge => `${edge.kind}:${edge.target.name}`), ['value:Req.cache'], 'the instance state a method works on');
   assert.deepEqual(adapter.dependencies(cached).edges, [], 'fields are followed only with values');
 });
+
+test('folders that cannot be read (macOS privacy folders, races) are skipped and reported, not fatal', async t => {
+  const root = project(t, {
+    'src/a.ts': 'export function alpha() { return beta(); }\nexport function beta() { return 1; }\n',
+    'Library/Accounts/secret.ts': 'export function hidden() { return 0; }\n',
+  });
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify({ include: ['src'] }));
+  // EPERM is what macOS returns for ~/Library/Accounts without Full Disk Access.
+  const original = fs.readdirSync;
+  fs.readdirSync = function (directory, ...rest) {
+    if (String(directory).replaceAll('\\', '/').endsWith('Library/Accounts')) throw Object.assign(new Error(`EPERM: operation not permitted, scandir '${directory}'`), { code: 'EPERM' });
+    return original.call(this, directory, ...rest);
+  };
+  t.after(() => { fs.readdirSync = original; });
+  const { parseProjectConfigs } = await import('../dist/project-config.js');
+  const configs = parseProjectConfigs(root);
+  assert.equal(configs.projects.length, 1);
+  assert.ok(configs.warnings.some(warning => /Skipped 1 folder that could not be read: Library\/Accounts/.test(warning)));
+  const scan = new RepositoryIndex(root).scan(100);
+  assert.deepEqual(scan.nodes.map(node => node.name).sort(), ['alpha', 'beta']);
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  const adapter = new TypeScriptAdapter(root);
+  assert.deepEqual(adapter.reverseDependencies(adapter.findEntry({ file: 'src/a.ts', symbol: 'beta' })).edges.map(edge => edge.target.name), ['alpha']);
+});
+
+test('errors are explained with what to do next, and a home directory is refused with instructions', async () => {
+  const os = await import('node:os');
+  const { explainError, UserFacingError } = await import('../dist/errors.js');
+  const { unsuitableRoot } = await import('../dist/fs-walk.js');
+  const explain = error => explainError(error).split('\n')[0];
+  assert.match(explain(new Error('Decision request failed (401): Unauthorized')), /rejected the API key\. Run `npx -y jevtrace setup`/);
+  assert.match(explain(new Error('Decision request failed (402): Insufficient credits')), /no credits left/);
+  assert.match(explain(new Error('Decision request failed (429): slow down')), /rate limiting/);
+  assert.match(explain(new Error('Decision request failed (503): unavailable')), /having trouble \(HTTP 503\)/);
+  assert.match(explain(new Error('Decision request failed after retry: TypeError: fetch failed')), /could not reach the Jev provider/);
+  assert.match(explain(Object.assign(new Error('EACCES'), { code: 'EACCES', path: '/srv/private' })), /could not read \/srv\/private \(permission denied\)/);
+  assert.match(explain(new Error('Cannot read properties of undefined')), /unexpected error\. Please report it .*issues/);
+  assert.match(explainError(new Error('Cannot read properties of undefined')), /\(Cannot read properties of undefined\)$/, 'the original error is kept for reports');
+  assert.equal(explainError(new UserFacingError('Setup cancelled; nothing was saved.')), 'Setup cancelled; nothing was saved.');
+
+  assert.match(unsuitableRoot(os.homedir()), /started in your home directory .* not in a project/);
+  assert.match(unsuitableRoot(path.parse(os.homedir()).root), /started in the filesystem root/);
+  assert.equal(unsuitableRoot(path.join(os.tmpdir(), 'some-project')), undefined);
+});

@@ -4,11 +4,12 @@ import ts from 'typescript';
 import type { CodeNode, Dependency, DependencyScan, EdgeKind, EntryInput, LanguageAdapter, SourceLocation, SupportingContext, Unresolved } from './types.js';
 import { parseProjectConfigs, selectProjectFromParsed, type ParsedProjectConfig } from './project-config.js';
 import { isVueFile, scriptText, vueScript } from './vue.js';
+import { readDirectory } from './fs-walk.js';
 
 const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.vue']);
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next']);
 function collectSources(dir: string, files: string[]): void {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of readDirectory(dir)) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory() && !ignored.has(entry.name) && !entry.name.startsWith('.')) collectSources(full, files);
     else if (entry.isFile() && extensions.has(path.extname(entry.name)) && !entry.name.endsWith('.d.ts')) files.push(full);

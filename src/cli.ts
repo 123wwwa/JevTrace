@@ -10,13 +10,15 @@ import { query } from './query.js';
 import { RepositoryIndex, defaultMaxFiles, discoverEntries } from './discovery.js';
 import { formatStats } from './stats.js';
 import { clientsGuide, configuredProvider, runSetup } from './setup.js';
+import { explainError } from './errors.js';
+import { unsuitableRoot } from './fs-walk.js';
 
 if (process.argv[2] === 'setup') {
   try {
     await runSetup();
     process.exit(0);
   } catch (error) {
-    process.stderr.write(`\n${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`\n${explainError(error)}\n`);
     process.exit(1);
   }
 }
@@ -26,7 +28,7 @@ if (process.argv.length === 2 && process.stdin.isTTY) {
   if (!configuredProvider()) {
     process.stdout.write('No decision provider is configured yet; starting setup.\n\n');
     try { await runSetup(); } catch (error) {
-      process.stderr.write(`\n${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`\n${explainError(error)}\n`);
       process.exit(1);
     }
   } else {
@@ -62,10 +64,24 @@ if (rootArgument >= 0 && !process.argv[rootArgument + 1]) {
 const root = path.resolve(rootArgument >= 0 ? process.argv[rootArgument + 1] : process.env.CLAUDE_PROJECT_DIR || process.cwd());
 // Fail at startup with the reason on stderr (which MCP hosts show in their logs), not at the first request.
 if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
-  process.stderr.write(`jevtrace: project root is not a directory: ${root}\n`);
+  process.stderr.write(`jevtrace: the project folder ${root} does not exist or is not a folder. Check the --root you registered, or start your agent from the project folder.\n`);
   process.exit(1);
 }
+// Anything that escapes a handler still ends with an explanation, not a bare stack or a silent exit.
+process.on('uncaughtException', error => {
+  process.stderr.write(`jevtrace: ${explainError(error)}\n`);
+  process.exit(1);
+});
+process.on('unhandledRejection', error => {
+  process.stderr.write(`jevtrace: ${explainError(error)}\n`);
+  process.exit(1);
+});
+const unsuitable = unsuitableRoot(root);
 if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
+  if (unsuitable) {
+    process.stderr.write(`${unsuitable.replace(/your agent/, 'this command').replace(/start the agent/, 'run it')}\n`);
+    process.exit(1);
+  }
   const argument = (name: string): string | undefined => {
     const index = process.argv.indexOf(name);
     return index < 0 ? undefined : process.argv[index + 1];
@@ -122,11 +138,13 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
         wrapperLookahead: !process.argv.includes('--no-wrapper-lookahead'), visitPolicy: argument('--visit-policy') === 'choice' ? 'choice' : 'score' });
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
-    process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n');
+    process.stderr.write(`${explainError(error)}\n`);
     process.exitCode = 1;
   }
 } else {
   // MCP hosts show stderr in their logs; tool calls report the same with the fix.
   if (!configuredProvider()) process.stderr.write('jevtrace: no decision provider is configured; run `npx -y jevtrace setup` in a terminal\n');
+  // The server still starts, so the agent can show this message as the tool's answer; the log gets it too.
+  if (unsuitable) process.stderr.write(`jevtrace: ${unsuitable}\n`);
   serveStdio(() => createServer(root));
 }

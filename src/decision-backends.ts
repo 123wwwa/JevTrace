@@ -184,6 +184,8 @@ const jev = (config: { endpoint: string; apiKey: string }) => new JevBackend(con
  * vendor's decisions API): implement DecisionBackend for its wire format and add an entry here.
  */
 export const providers = {
+  // Each model is the newest Jev the provider serves, checked 2026-10-01: OpenRouter and OpenCode Zen only
+  // list versioned ids (OpenRouter rejects `typesafe/jev-latest`), TypeSafe and Vercel track the latest.
   openrouter: { label: 'OpenRouter', keyEnv: 'OPENROUTER_API_KEY', endpoint: 'https://openrouter.ai/api/alpha/decisions', model: 'typesafe/jev-1.13', createBackend: jev },
   typesafe: { label: 'TypeSafe', keyEnv: 'TYPESAFE_API_KEY', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', createBackend: jev },
   vercel: { label: 'Vercel AI Gateway', keyEnv: 'AI_GATEWAY_API_KEY', endpoint: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone', model: 'typesafe-ai/jev', createBackend: jev },

@@ -548,7 +548,8 @@ test('jevtrace setup saves the chosen provider, key and model; the environment s
   const checked = [];
   // Providers are listed alphabetically: 1 OpenCode Zen, 2 OpenRouter, 3 TypeSafe, 4 Vercel AI Gateway, 5 custom.
   const answers = lines => Readable.from([lines.join('\n') + '\n']);
-  const saved = await runSetup({ env, output, input: answers(['3', 'first-key', '', 'n', '']),
+  // provider, key, then "n" (save anyway) after the failed check; there is no model question.
+  const saved = await runSetup({ env, output, input: answers(['3', 'first-key', 'n']),
     verify: async config => { checked.push(config.apiKey); return checked.length === 1 ? 'HTTP 401: invalid key' : undefined; } });
   assert.deepEqual(checked, ['first-key']);
   assert.deepEqual(saved, { provider: 'typesafe', apiKey: 'first-key' });
@@ -558,9 +559,12 @@ test('jevtrace setup saves the chosen provider, key and model; the environment s
   assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { provider: 'typesafe', apiKey: 'first-key' });
   if (process.platform !== 'win32') assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
 
-  // Enter keeps the saved provider and key; a new model is stored.
-  await runSetup({ env, output, input: answers(['', '', 'jev-next']), verify: async () => undefined });
-  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { provider: 'typesafe', apiKey: 'first-key', model: 'jev-next' });
+  // Enter keeps the saved provider and key. A model saved by an older setup is dropped: setup no longer asks,
+  // and the provider's latest Jev is used.
+  fs.writeFileSync(configFile, JSON.stringify({ provider: 'typesafe', apiKey: 'first-key', model: 'jev-old' }));
+  await runSetup({ env, output, input: answers(['', '']), verify: async () => undefined });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { provider: 'typesafe', apiKey: 'first-key' });
+  assert.ok(!/Model \[/.test(printed), 'no model prompt');
 
   const seen = [];
   const originalFetch = globalThis.fetch;
@@ -577,12 +581,12 @@ test('jevtrace setup saves the chosen provider, key and model; the environment s
     globalThis.fetch = originalFetch;
   }
   assert.deepEqual(seen, [
-    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-next', authorization: 'Bearer first-key' },
-    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-next', authorization: 'Bearer env-key' },
+    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', authorization: 'Bearer first-key' },
+    { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', authorization: 'Bearer env-key' },
   ]);
 });
 
-test('in a terminal the API key is read in raw mode: one * per character, backspace works, the key is never echoed', async t => {
+test('in a terminal the provider is picked with the arrow keys and the key is read in raw mode, never echoed', async t => {
   const { runSetup } = await import('../dist/setup.js');
   const { PassThrough, Writable } = await import('node:stream');
   const fs = await import('node:fs');
@@ -595,7 +599,8 @@ test('in a terminal the API key is read in raw mode: one * per character, backsp
   input.setRawMode = mode => { rawModes.push(mode); return input; };
   let printed = '';
   // Answer each prompt as it appears, the way a person types.
-  const replies = [[/Provider \[1-5\]: $/, '2\n'], [/\(hidden\): $/, 'sk-ab\u007fc\r'], [/Model \[typesafe\/jev-1\.13\]: $/, '\n']];
+  // Down twice, up once (OpenCode Zen → OpenRouter → TypeSafe → OpenRouter), Enter; then the key with a backspace.
+  const replies = [[/Provider .*\(↑\/↓, Enter\)/, '\x1b[B\x1b[B\x1b[A\r'], [/\(hidden\): $/, 'sk-ab\u007fc\r']];
   const output = new Writable({ write(chunk, _encoding, done) {
     printed += chunk;
     const next = replies[0];
@@ -604,7 +609,9 @@ test('in a terminal the API key is read in raw mode: one * per character, backsp
   } });
   const saved = await runSetup({ env: { JEVTRACE_CONFIG: path.join(dir, 'config.json') }, input, output, verify: async () => undefined });
   assert.deepEqual(saved, { provider: 'openrouter', apiKey: 'sk-ac' });
-  assert.deepEqual(rawModes, [true, false]);
+  assert.deepEqual(rawModes, [true, false, true, false], 'raw mode for the picker, then for the key');
+  assert.match(printed, /❯ OpenRouter/);
+  assert.match(printed, /Provider: OpenRouter\n/);
   assert.match(printed, /\(hidden\): \*\*\*\*\*\u0008 \u0008\*\n/);
   assert.ok(!printed.includes('sk-a'));
 });

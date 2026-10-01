@@ -3,11 +3,12 @@ import { performance } from 'node:perf_hooks';
 import { JevBackend, providers, type ProviderSpec } from './decision-backends.js';
 import { DecisionJudge } from './judges.js';
 import { readUserConfig, userConfigPath, writeUserConfig, type UserConfig } from './user-config.js';
+import { UserFacingError } from './errors.js';
 
 /**
- * `jevtrace setup`: choose the decision provider, enter its API key (hidden while typed), optionally a model,
- * check the key with one small request, and save it to the user config. Also reads answers line by line from
- * a pipe, for scripts.
+ * `jevtrace setup`: pick the decision provider with the arrow keys, enter its API key (hidden while typed),
+ * check the key with one small request, and save it to the user config. The model is the provider's latest
+ * Jev. Also reads answers line by line from a pipe, for scripts.
  */
 
 /** Setup for each MCP client (docs/clients.md). */
@@ -27,7 +28,7 @@ class Prompter {
       try {
         return await new Promise<string>((resolve, reject) => {
           rl.once('line', answer => resolve(answer.trim()));
-          rl.once('close', () => reject(new Error('Setup cancelled')));
+          rl.once('close', () => reject(new UserFacingError('Setup cancelled; nothing was saved.')));
         });
       } finally {
         rl.removeAllListeners('close');
@@ -36,9 +37,58 @@ class Prompter {
     }
     this.lines ??= readline.createInterface({ input: this.input, terminal: false })[Symbol.asyncIterator]();
     const next = await this.lines.next();
-    if (next.done) throw new Error('Setup input ended before every answer was given');
+    if (next.done) throw new UserFacingError('Setup input ended before every answer was given; nothing was saved.');
     this.output.write('\n');
     return next.value.trim();
+  }
+
+  /**
+   * Picks one of `labels` with the arrow keys (or k/j) and Enter, starting at `initial`. Off a terminal, the
+   * list is numbered and one line is read: a number, a name from `names`, or nothing for `initial`.
+   */
+  async select(question: string, labels: string[], names: string[], initial: number | undefined): Promise<number> {
+    if (!this.input.isTTY) {
+      labels.forEach((label, index) => this.output.write(`  ${index + 1}. ${label}\n`));
+      for (;;) {
+        const answer = await this.line(`${question} [1-${labels.length}]${initial !== undefined ? ` (Enter keeps ${names[initial]})` : ''}: `);
+        if (!answer && initial !== undefined) return initial;
+        const index = /^\d+$/.test(answer) ? Number(answer) - 1 : names.indexOf(answer.toLowerCase());
+        if (index >= 0 && index < labels.length) return index;
+        this.output.write(`Enter a number from 1 to ${labels.length}.\n`);
+      }
+    }
+    const input = this.input;
+    const output = this.output;
+    let index = initial ?? 0;
+    const render = (first: boolean) => {
+      if (!first) output.write(`\x1b[${labels.length}A`);
+      labels.forEach((label, row) => output.write(`\x1b[2K${row === index ? `\x1b[36m❯ ${label}\x1b[0m` : `  ${label}`}\n`));
+    };
+    output.write(`${question} \x1b[2m(↑/↓, Enter)\x1b[0m\n\x1b[?25l`);
+    render(true);
+    input.setRawMode(true);
+    input.setEncoding('utf8');
+    input.resume();
+    return new Promise<number>((resolve, reject) => {
+      const finish = () => {
+        input.off('data', onData);
+        input.setRawMode(false);
+        input.pause();
+        output.write('\x1b[?25h');
+      };
+      const onData = (chunk: string) => {
+        // Arrow keys arrive as escape sequences; anything else is read one character at a time.
+        for (const key of chunk.match(/\x1b\[[A-D]|[\s\S]/g) ?? []) {
+          if (key === '\x1b[A' || key === 'k') index = (index + labels.length - 1) % labels.length;
+          else if (key === '\x1b[B' || key === 'j') index = (index + 1) % labels.length;
+          else if (key === '\r' || key === '\n') { finish(); resolve(index); return; }
+          else if (key === '\u0003') { finish(); reject(new UserFacingError('Setup cancelled; nothing was saved.')); return; }
+          else continue;
+          render(false);
+        }
+      };
+      input.on('data', onData);
+    });
   }
 
   /** Echoes one `*` per character; the key itself never reaches the screen. */
@@ -60,7 +110,7 @@ class Prompter {
       const onData = (chunk: string) => {
         for (const character of chunk) {
           if (character === '\r' || character === '\n') { finish(); resolve(value.trim()); return; }
-          if (character === '\u0003') { finish(); reject(new Error('Setup cancelled')); return; }
+          if (character === '\u0003') { finish(); reject(new UserFacingError('Setup cancelled; nothing was saved.')); return; }
           if (character === '\u007f' || character === '\b') {
             if (value) { value = value.slice(0, -1); this.output.write('\b \b'); }
             continue;
@@ -113,18 +163,17 @@ export async function runSetup(options: SetupOptions = {}): Promise<UserConfig> 
       .sort((a, b) => a.label.localeCompare(b.label)),
     { name: 'custom', label: 'Custom endpoint (Jev System One format)' },
   ];
-  output.write('JevTrace setup: choose the decision provider that judges which code is relevant.\n\n');
-  choices.forEach((choice, index) => output.write(`  ${index + 1}. ${choice.label.padEnd(40)}${choice.spec ? ` ${choice.spec.keyEnv}` : ''}\n`));
-  if (!(options.input ?? process.stdin).isTTY) output.write('\n(Input is not a terminal: answers are read line by line and the key is not hidden.)\n');
+  output.write('JevTrace setup: choose where to reach Jev, the decision model that judges which code is relevant.\n');
+  if (!(options.input ?? process.stdin).isTTY) output.write('(Input is not a terminal: answers are read line by line and the key is not hidden.)\n');
+  output.write('\n');
 
   const currentIndex = current ? choices.findIndex(choice => choice.name === current.provider) : -1;
-  let choice: Choice | undefined;
-  while (!choice) {
-    const answer = await prompt.line(`\nProvider [1-${choices.length}]${currentIndex >= 0 ? ` (Enter keeps ${choices[currentIndex].label})` : ''}: `);
-    if (!answer && currentIndex >= 0) choice = choices[currentIndex];
-    else choice = choices[Number(answer) - 1] ?? choices.find(each => each.name === answer.toLowerCase());
-    if (!choice) output.write(`Enter a number from 1 to ${choices.length}.\n`);
-  }
+  const picked = await prompt.select('Provider',
+    choices.map(choice => `${choice.label.padEnd(40)}${choice.spec ? ` ${choice.spec.keyEnv}` : ''}`),
+    choices.map(choice => choice.name),
+    currentIndex >= 0 ? currentIndex : undefined);
+  const choice = choices[picked];
+  output.write(`Provider: ${choice.label}\n`);
 
   const kept = current?.provider === choice.name ? current : undefined;
   let endpoint: string | undefined;
@@ -135,8 +184,6 @@ export async function runSetup(options: SetupOptions = {}): Promise<UserConfig> 
       if (endpoint && !/^https?:\/\//.test(endpoint)) { output.write('Enter an http(s) URL.\n'); endpoint = undefined; }
     }
   }
-  const defaultModel = kept?.model ?? choice.spec?.model ?? 'jev-latest';
-
   for (;;) {
     let apiKey: string | undefined;
     while (apiKey === undefined) {
@@ -146,11 +193,11 @@ export async function runSetup(options: SetupOptions = {}): Promise<UserConfig> 
       if (!apiKey && choice.spec) { output.write('An API key is required.\n'); apiKey = undefined; }
       apiKey ??= choice.spec ? undefined : '';
     }
-    const model = (await prompt.line(`Model [${defaultModel}]: `)) || defaultModel;
+    // No model question: each provider's default is its latest Jev (see `providers`). JEVTRACE_MODEL or
+    // --model still choose another one.
     const config: UserConfig = {
       provider: choice.name,
       ...(apiKey ? { apiKey } : {}),
-      ...(model !== choice.spec?.model ? { model } : {}),
       ...(endpoint ? { endpoint } : {}),
     };
 
