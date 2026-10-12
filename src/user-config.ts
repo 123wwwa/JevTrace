@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { UserFacingError } from './errors.js';
 
 /**
  * The decision provider chosen with `jevtrace setup`, so the CLI and MCP server work without a `.env` file.
@@ -29,10 +30,10 @@ export function readUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   try {
     parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (error) {
-    throw new Error(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}; run \`npx -y jevtrace setup\` again`);
+    throw new UserFacingError(`Cannot read ${file}: ${error instanceof Error ? error.message : String(error)}; run \`npx -y jevtrace setup\` again`);
   }
   const config = parsed as Partial<UserConfig>;
-  if (!config || typeof config.provider !== 'string') throw new Error(`${file} has no provider; run \`npx -y jevtrace setup\` again`);
+  if (!config || typeof config.provider !== 'string') throw new UserFacingError(`${file} has no provider; run \`npx -y jevtrace setup\` again`);
   return {
     provider: config.provider,
     ...(typeof config.apiKey === 'string' ? { apiKey: config.apiKey } : {}),
@@ -41,10 +42,20 @@ export function readUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   };
 }
 
+/**
+ * The config file's text, or a marker when there is none: a running server compares it between calls so a key
+ * or provider changed with `jevtrace setup` takes effect without restarting the agent.
+ */
+export function userConfigStamp(env: NodeJS.ProcessEnv = process.env): string {
+  const file = userConfigPath(env);
+  if (!file) return 'off';
+  try { return fs.readFileSync(file, 'utf8'); } catch { return 'none'; }
+}
+
 /** Writes the config readable by the current user only (on Windows the file inherits the profile folder's access). */
 export function writeUserConfig(config: UserConfig, env: NodeJS.ProcessEnv = process.env): string {
   const file = userConfigPath(env);
-  if (!file) throw new Error('JEVTRACE_CONFIG=off: there is no config file to write');
+  if (!file) throw new UserFacingError('JEVTRACE_CONFIG=off: there is no config file to write');
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   fs.chmodSync(file, 0o600);

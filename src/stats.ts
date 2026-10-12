@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readUsage, usageLogPath, type UsageEntry } from './usage-log.js';
+import { readDirectory } from './fs-walk.js';
 
 /** Search-like built-in tools; a session that used these but never JevTrace searched without it. */
 const searchTools = new Set(['Grep', 'Glob', 'Read', 'Search', 'LS']);
@@ -14,44 +15,68 @@ export interface SessionUse {
   searchCalls: number;
 }
 
-/** Scans Claude Code transcripts (~/.claude/projects/<project>/<session>.jsonl) for JevTrace and search tool calls. */
-export function scanClaudeSessions(sinceMs: number, env: NodeJS.ProcessEnv = process.env): SessionUse[] {
+export interface SessionScan {
+  sessions: SessionUse[];
+  /** Transcripts in the period left unread: over `maxBytes`, or unreadable. */
+  unscanned: number;
+}
+
+/**
+ * Scans Claude Code transcripts (~/.claude/projects/<project>/<session>.jsonl) for JevTrace and search tool
+ * calls, newest first. Transcripts are read whole and can total hundreds of megabytes, so a caller that must
+ * answer quickly (the MCP tool, whose server serves other requests) passes `maxBytes`; older transcripts past
+ * it are counted, not read. A transcript or folder that cannot be read is skipped, never an error.
+ */
+export function scanClaudeSessions(sinceMs: number, env: NodeJS.ProcessEnv = process.env, maxBytes = Infinity): SessionScan {
   const projectsDir = path.join(env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
-  if (!fs.existsSync(projectsDir)) return [];
-  const sessions: SessionUse[] = [];
-  for (const projectDir of fs.readdirSync(projectsDir, { withFileTypes: true })) {
+  const transcripts: Array<{ file: string; project: string; mtimeMs: number; size: number }> = [];
+  for (const projectDir of readDirectory(projectsDir)) {
     if (!projectDir.isDirectory()) continue;
-    for (const entry of fs.readdirSync(path.join(projectsDir, projectDir.name), { withFileTypes: true })) {
+    for (const entry of readDirectory(path.join(projectsDir, projectDir.name))) {
       if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
       const file = path.join(projectsDir, projectDir.name, entry.name);
-      const stat = fs.statSync(file);
-      if (stat.mtimeMs < sinceMs) continue;
-      let project = projectDir.name;
-      let jevtraceCalls = 0;
-      let searchCalls = 0;
-      for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-        if (!line.includes('"tool_use"') && !line.includes('"cwd"')) continue;
-        let record: { cwd?: string; message?: { content?: unknown } };
-        try { record = JSON.parse(line); } catch { continue; }
-        if (typeof record.cwd === 'string') project = record.cwd;
-        const content = record.message?.content;
-        if (!Array.isArray(content)) continue;
-        for (const block of content as Array<{ type?: string; name?: string }>) {
-          if (block.type !== 'tool_use' || typeof block.name !== 'string') continue;
-          if (block.name.startsWith('mcp__jevtrace__')) jevtraceCalls++;
-          else if (searchTools.has(block.name)) searchCalls++;
-        }
-      }
-      if (jevtraceCalls || searchCalls) sessions.push({ file, project, lastActivity: stat.mtime.toISOString(), jevtraceCalls, searchCalls });
+      try {
+        const stat = fs.statSync(file);
+        if (stat.mtimeMs >= sinceMs) transcripts.push({ file, project: projectDir.name, mtimeMs: stat.mtimeMs, size: stat.size });
+      } catch { /* removed while scanning */ }
     }
   }
-  return sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+  transcripts.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const sessions: SessionUse[] = [];
+  let unscanned = 0;
+  let readBytes = 0;
+  for (const transcript of transcripts) {
+    if (readBytes + transcript.size > maxBytes) { unscanned++; continue; }
+    let text: string;
+    try { text = fs.readFileSync(transcript.file, 'utf8'); } catch { unscanned++; continue; }
+    readBytes += transcript.size;
+    let project = transcript.project;
+    let jevtraceCalls = 0;
+    let searchCalls = 0;
+    for (const line of text.split('\n')) {
+      if (!line.includes('"tool_use"') && !line.includes('"cwd"')) continue;
+      let record: { cwd?: string; message?: { content?: unknown } };
+      try { record = JSON.parse(line); } catch { continue; }
+      if (typeof record.cwd === 'string') project = record.cwd;
+      const content = record.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content as Array<{ type?: string; name?: string }>) {
+        if (block.type !== 'tool_use' || typeof block.name !== 'string') continue;
+        if (block.name.startsWith('mcp__jevtrace__')) jevtraceCalls++;
+        else if (searchTools.has(block.name)) searchCalls++;
+      }
+    }
+    if (jevtraceCalls || searchCalls) sessions.push({ file: transcript.file, project, lastActivity: new Date(transcript.mtimeMs).toISOString(), jevtraceCalls, searchCalls });
+  }
+  return { sessions, unscanned };
 }
 
 const sum = (values: Array<number | undefined>) => values.reduce<number>((total, value) => total + (value ?? 0), 0);
 const n = (value: number) => Math.round(value).toLocaleString('en-US');
 
-export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env): string {
+/** `maxScanBytes` bounds the transcript scan (see `scanClaudeSessions`); the terminal command reads them all. */
+export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env, maxScanBytes = Infinity): string {
   const sinceMs = Date.now() - days * 86_400_000;
   const calls = readUsage(env).filter(entry => Date.parse(entry.time) >= sinceMs);
   const lines: string[] = [`JevTrace usage, last ${days} day${days === 1 ? '' : 's'}`, ''];
@@ -78,7 +103,7 @@ export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env):
       `  ${entry.time.slice(0, 16).replace('T', ' ')}  ${entry.tool.padEnd(27)} ${entry.outcome.padEnd(10)} ${String(Math.round(entry.ms / 100) / 10).padStart(5)}s  ${entry.task.slice(0, 70)}`));
   }
 
-  const sessions = scanClaudeSessions(sinceMs, env);
+  const { sessions, unscanned } = scanClaudeSessions(sinceMs, env, maxScanBytes);
   lines.push('', `Claude Code sessions with code search: ${sessions.length}`);
   if (sessions.length) {
     const used = sessions.filter(session => session.jevtraceCalls > 0);
@@ -87,5 +112,6 @@ export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env):
     lines.push('', 'Recent sessions:', ...sessions.slice(0, 8).map(session =>
       `  ${session.lastActivity.slice(0, 16).replace('T', ' ')}  jevtrace ${String(session.jevtraceCalls).padStart(2)}  search ${String(session.searchCalls).padStart(3)}  ${session.project}`));
   }
+  if (unscanned) lines.push('', `${unscanned} older or unreadable session transcript${unscanned === 1 ? ' was' : 's were'} not scanned; \`npx -y jevtrace stats --days ${days}\` in a terminal reads them all.`);
   return lines.join('\n');
 }

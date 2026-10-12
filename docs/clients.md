@@ -91,11 +91,15 @@ npx -y jevtrace stats --days 7
 
 summarizes the calls on your machine (task, outcome, tokens returned, Jev requests and cost) from `~/.jevtrace/usage.jsonl`, and, for Claude Code, how many sessions used JevTrace and how many searched only with Grep, Glob or Read. Nothing in that log leaves your machine; set `JEVTRACE_USAGE_LOG=off` to turn it off.
 
+`npx -y jevtrace --help` lists every command, and `--version` prints the installed version.
+
 ## If it does not work
 
 | Symptom | Cause and fix |
 | --- | --- |
 | The tool answers "No decision provider is configured" | Run `npx -y jevtrace setup` in a terminal. |
+| A result starts with "Jev could not be used for this result" | The provider rejected the key, has no credits left or could not be reached; the line says which. The result is then ranked by keywords and code structure only. For a rejected key, run `npx -y jevtrace setup` again: the running server uses the new key from the next call. A key set in the environment (`OPENROUTER_API_KEY` and the like) overrides the saved one, so change it there if you set one. |
+| The tool answers "JevTrace was started in your home directory" | The agent was started outside a project. Start it in the project folder, or register JevTrace with `--root /path/to/project`. |
 | It searches the wrong project | Claude Code: nothing to do; Cursor: check `--root ${workspaceFolder}`; Codex: start Codex in the project, or set `cwd` / `--root`. |
 | The server times out on first start | The first `npx` run downloads the package. Raise the client's startup timeout (Codex: `startup_timeout_sec`), or install it once with `npm install -g jevtrace` and use `jevtrace` as the command. |
 | `spawn npx ENOENT` on Windows | Use `cmd /c npx` as shown above. |

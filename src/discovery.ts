@@ -6,6 +6,7 @@ import ts from 'typescript';
 import type { CodeNode, JudgeCallStats, Judgment, LanguageAdapter, RelevanceJudge } from './types.js';
 import { parseProjectConfigs } from './project-config.js';
 import { describeSkipped, readDirectory } from './fs-walk.js';
+import { UserFacingError } from './errors.js';
 import { isVueFile, vueScript } from './vue.js';
 
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.turbo']);
@@ -564,7 +565,7 @@ export async function discoverEntries(
   options: DiscoveryOptions = {},
   adapter?: LanguageAdapter,
 ): Promise<DiscoveryResult> {
-  if (!task.trim()) throw new Error('Task must not be empty');
+  if (!task.trim()) throw new UserFacingError('Task must not be empty');
   const maxCandidates = options.maxCandidates ?? 64;
   const maxLeads = options.maxLeads ?? 4;
   const maxFiles = options.maxFiles ?? defaultMaxFiles;
@@ -574,14 +575,14 @@ export async function discoverEntries(
   const minLeadScore = options.minLeadScore ?? 0.3;
   const minFileScore = options.minFileScore ?? 0.3;
   const lexicalRescueFiles = options.lexicalRescueFiles ?? 4;
-  if (!Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 128) throw new Error('maxCandidates must be between 1 and 128');
-  if (!Number.isInteger(maxLeads) || maxLeads < 1 || maxLeads > 8) throw new Error('maxLeads must be between 1 and 8');
-  if (!Number.isInteger(maxFiles) || maxFiles < 1 || maxFiles > 100000) throw new Error('maxFiles must be between 1 and 100000');
-  if (!Number.isInteger(maxJevFiles) || maxJevFiles < 1 || maxJevFiles > 1000) throw new Error('maxJevFiles must be between 1 and 1000');
-  if (!Number.isInteger(maxRelevantDirectories) || maxRelevantDirectories < 1 || maxRelevantDirectories > 32) throw new Error('maxRelevantDirectories must be between 1 and 32');
-  if (!Number.isInteger(maxRelevantFiles) || maxRelevantFiles < 1 || maxRelevantFiles > 32) throw new Error('maxRelevantFiles must be between 1 and 32');
-  if (!Number.isInteger(lexicalRescueFiles) || lexicalRescueFiles < 0 || lexicalRescueFiles > 16) throw new Error('lexicalRescueFiles must be between 0 and 16');
-  if (minLeadScore < 0 || minLeadScore > 1 || minFileScore < 0 || minFileScore > 1) throw new Error('Discovery score thresholds must be between 0 and 1');
+  if (!Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 128) throw new UserFacingError('maxCandidates must be between 1 and 128');
+  if (!Number.isInteger(maxLeads) || maxLeads < 1 || maxLeads > 8) throw new UserFacingError('maxLeads must be between 1 and 8');
+  if (!Number.isInteger(maxFiles) || maxFiles < 1 || maxFiles > 100000) throw new UserFacingError('maxFiles must be between 1 and 100000');
+  if (!Number.isInteger(maxJevFiles) || maxJevFiles < 1 || maxJevFiles > 1000) throw new UserFacingError('maxJevFiles must be between 1 and 1000');
+  if (!Number.isInteger(maxRelevantDirectories) || maxRelevantDirectories < 1 || maxRelevantDirectories > 32) throw new UserFacingError('maxRelevantDirectories must be between 1 and 32');
+  if (!Number.isInteger(maxRelevantFiles) || maxRelevantFiles < 1 || maxRelevantFiles > 32) throw new UserFacingError('maxRelevantFiles must be between 1 and 32');
+  if (!Number.isInteger(lexicalRescueFiles) || lexicalRescueFiles < 0 || lexicalRescueFiles > 16) throw new UserFacingError('lexicalRescueFiles must be between 0 and 16');
+  if (minLeadScore < 0 || minLeadScore > 1 || minFileScore < 0 || minFileScore > 1) throw new UserFacingError('Discovery score thresholds must be between 0 and 1');
 
   options.signal?.throwIfAborted();
   const started = performance.now();

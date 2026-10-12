@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import type { Candidate, CodeNode, ContextLevel, Dependency, EdgeKind, EntryInput, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
+import { UserFacingError } from './errors.js';
 
 export interface ContextItem {
   node: CodeNode;
@@ -72,10 +73,10 @@ export async function retrieve(adapter: LanguageAdapter, judge: RelevanceJudge, 
   const bodyThreshold = options.bodyThreshold ?? 0.3;
   const omitThreshold = options.omitThreshold ?? 0.3;
   if (omitThreshold < 0 || omitThreshold > 1 || bodyThreshold < 0 || bodyThreshold > 1 || omitThreshold > bodyThreshold)
-    throw new Error('Thresholds must satisfy 0 <= omitThreshold <= bodyThreshold <= 1');
+    throw new UserFacingError('Thresholds must satisfy 0 <= omitThreshold <= bodyThreshold <= 1');
   if (!Number.isInteger(reverseFanIn) || reverseFanIn < 1 || reverseFanIn > 100)
-    throw new Error('reverseFanIn must be an integer between 1 and 100');
-  if (visitPolicy === 'choice' && !judge.chooseNext) throw new Error('The selected judge does not support Choice visit policy');
+    throw new UserFacingError('reverseFanIn must be an integer between 1 and 100');
+  if (visitPolicy === 'choice' && !judge.chooseNext) throw new UserFacingError('The selected judge does not support Choice visit policy');
 
   const entry = adapter.findEntry(input);
   const items: ContextItem[] = [{ node: entry, level: 'body', path: [entry.name], depth: 0, score: input.score }];

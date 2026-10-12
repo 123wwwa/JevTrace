@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks';
 import type { Candidate, CodeNode, Dependency, EdgeKind, JudgeCallResult, JudgeCallStats, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
+import { UserFacingError } from './errors.js';
 import { discoverEntries, type DiscoveryOptions, type DiscoveryResult, type RepositoryIndex } from './discovery.js';
 import type { ContextItem, JudgeRoundTrace, RetrievalOptions, RetrievalResult } from './retrieve.js';
 import { broadTaskGuidance, broadTaskThreshold, repositoryMap, sourceInventory, suggestSubtasks, type BroadTaskResult } from './broad-task.js';
@@ -118,10 +119,10 @@ export async function retrieveTaskContext(
   const reverseFanIn = options.reverseFanIn ?? 12;
   const contextRanking = options.contextRanking ?? 'jev';
 
-  if (!Number.isInteger(perLeadNodeLimit) || perLeadNodeLimit < 1 || perLeadNodeLimit > 100) throw new Error('perLeadNodeLimit must be between 1 and 100');
-  if (!Number.isInteger(perLeadTokenBudget) || perLeadTokenBudget < 100) throw new Error('perLeadTokenBudget must be at least 100');
-  if (!Number.isInteger(neighborhoodTokenBudget) || neighborhoodTokenBudget < tokenBudget) throw new Error('neighborhoodTokenBudget must be >= tokenBudget');
-  if (!Number.isInteger(lexicalMergeLimit) || lexicalMergeLimit < 0 || lexicalMergeLimit > 128) throw new Error('lexicalMergeLimit must be between 0 and 128');
+  if (!Number.isInteger(perLeadNodeLimit) || perLeadNodeLimit < 1 || perLeadNodeLimit > 100) throw new UserFacingError('perLeadNodeLimit must be between 1 and 100');
+  if (!Number.isInteger(perLeadTokenBudget) || perLeadTokenBudget < 100) throw new UserFacingError('perLeadTokenBudget must be at least 100');
+  if (!Number.isInteger(neighborhoodTokenBudget) || neighborhoodTokenBudget < tokenBudget) throw new UserFacingError('neighborhoodTokenBudget must be >= tokenBudget');
+  if (!Number.isInteger(lexicalMergeLimit) || lexicalMergeLimit < 0 || lexicalMergeLimit > 128) throw new UserFacingError('lexicalMergeLimit must be between 0 and 128');
 
   // The scope question runs alongside discovery, so a specific task pays no extra latency; a project-wide
   // task stops discovery, since any code it picked would be arbitrary.

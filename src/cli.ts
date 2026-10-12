@@ -10,11 +10,85 @@ import { query } from './query.js';
 import { RepositoryIndex, defaultMaxFiles, discoverEntries } from './discovery.js';
 import { formatStats } from './stats.js';
 import { clientsGuide, configuredProvider, runSetup } from './setup.js';
-import { explainError } from './errors.js';
+import { explainError, UserFacingError } from './errors.js';
 import { unsuitableRoot } from './fs-walk.js';
+import { version } from './version.js';
 
-if (process.argv[2] === 'setup') {
+const help = [
+  `jevtrace ${version}: an MCP server that hands coding agents the JS/TS code a task needs.`,
+  '',
+  'Usage:',
+  '  jevtrace setup                              choose a Jev provider and enter its API key (once)',
+  '  jevtrace [--root DIR]                       run the MCP server over stdio; this is what your agent starts',
+  '  jevtrace query --task TEXT [--root DIR]     print the context for a task as JSON (--offline needs no provider)',
+  '  jevtrace discover --task TEXT [--root DIR]  print the discovery candidates as JSON',
+  '  jevtrace stats [--days N]                   summarize the local usage log',
+  '  jevtrace --help | --version',
+  '',
+  'Register it with your agent:',
+  '  Claude Code:     claude mcp add jevtrace --scope user -- npx -y jevtrace',
+  `  Codex, Cursor:   ${clientsGuide}`,
+  'More options and examples: https://github.com/123wwwa/JevTrace/blob/main/docs/usage.md',
+  '',
+].join('\n');
+
+/** Ends the process with a message a person can act on; `explainError` words anything unexpected. */
+const fail = (error: unknown): never => {
+  process.stderr.write(`jevtrace: ${explainError(error)}\n`);
+  process.exit(1);
+};
+// Anything that escapes a handler still ends with an explanation, not a bare stack or a silent exit.
+process.on('uncaughtException', fail);
+process.on('unhandledRejection', fail);
+
+const args = process.argv.slice(2);
+const command = args[0];
+if (args.some(arg => arg === '--help' || arg === '-h') || command === 'help') {
+  process.stdout.write(help);
+  process.exit(0);
+}
+if (command === '--version' || command === '-v' || command === 'version') {
+  process.stdout.write(`${version}\n`);
+  process.exit(0);
+}
+// A mistyped command used to fall through to the MCP server, which then waited on stdin without a word.
+const commands = ['setup', 'stats', 'query', 'discover'];
+if (command !== undefined && !command.startsWith('-') && !commands.includes(command)) {
+  process.stderr.write(`jevtrace: unknown command "${command}".\n\n${help}`);
+  process.exit(1);
+}
+
+const argument = (name: string): string | undefined => {
+  const index = args.indexOf(name);
+  return index < 0 ? undefined : args[index + 1];
+};
+/** Rejects options this command does not have, so a typo is reported instead of silently ignored. */
+function checkOptions(valued: string[], switches: string[] = []): void {
+  for (let index = command?.startsWith('-') ? 0 : 1; index < args.length; index++) {
+    const option = args[index];
+    if (switches.includes(option)) continue;
+    if (!valued.includes(option)) throw new UserFacingError(`Unknown option ${option}${command && !command.startsWith('-') ? ` for \`jevtrace ${command}\`` : ''}. Run \`jevtrace --help\` for usage.`);
+    if (args[++index] === undefined) throw new UserFacingError(`${option} needs a value.`);
+  }
+}
+function numberArgument(name: string): number | undefined;
+function numberArgument(name: string, fallback: number): number;
+function numberArgument(name: string, fallback?: number): number | undefined {
+  const raw = argument(name);
+  if (raw === undefined) return fallback;
+  if (!raw.trim() || !Number.isFinite(Number(raw))) throw new UserFacingError(`${name} needs a number, got "${raw}".`);
+  return Number(raw);
+}
+function choiceArgument<const Choice extends string>(name: string, choices: readonly Choice[], fallback: Choice): Choice {
+  const raw = argument(name);
+  if (raw === undefined) return fallback;
+  if (!choices.includes(raw as Choice)) throw new UserFacingError(`${name} must be one of ${choices.join(', ')}, got "${raw}".`);
+  return raw as Choice;
+}
+
+if (command === 'setup') {
   try {
+    checkOptions([]);
     await runSetup();
     process.exit(0);
   } catch (error) {
@@ -24,7 +98,7 @@ if (process.argv[2] === 'setup') {
 }
 
 // Someone ran the server by hand in a terminal (MCP hosts connect through pipes): set it up or explain.
-if (process.argv.length === 2 && process.stdin.isTTY) {
+if (command === undefined && process.stdin.isTTY) {
   if (!configuredProvider()) {
     process.stdout.write('No decision provider is configured yet; starting setup.\n\n');
     try { await runSetup(); } catch (error) {
@@ -32,78 +106,75 @@ if (process.argv.length === 2 && process.stdin.isTTY) {
       process.exit(1);
     }
   } else {
-    process.stdout.write([
-      'jevtrace is an MCP server over stdio; register it with your agent instead of running it here, e.g.',
-      '  claude mcp add jevtrace --scope user -- npx -y jevtrace',
-      `Codex and Cursor: ${clientsGuide}`,
-      'Commands: setup | query --task TEXT [--root DIR] | discover --task TEXT | stats [--days N]',
-      '',
-    ].join('\n'));
+    process.stdout.write(help);
   }
   process.exit(0);
 }
 
-if (process.argv[2] === 'stats') {
-  const daysArgument = process.argv.indexOf('--days');
-  const days = daysArgument >= 0 ? Number(process.argv[daysArgument + 1]) : 7;
-  if (!Number.isFinite(days) || days <= 0) {
-    process.stderr.write('Usage: jevtrace stats [--days N]\n');
-    process.exit(1);
+if (command === 'stats') {
+  try {
+    checkOptions(['--days']);
+    const days = numberArgument('--days', 7);
+    if (days <= 0) throw new UserFacingError(`--days needs a number above 0, got "${argument('--days')}".`);
+    process.stdout.write(formatStats(days) + '\n');
+    process.exit(0);
+  } catch (error) {
+    fail(error);
   }
-  process.stdout.write(formatStats(days) + '\n');
-  process.exit(0);
 }
 
-const rootArgument = process.argv.indexOf('--root');
-if (rootArgument >= 0 && !process.argv[rootArgument + 1]) {
-  process.stderr.write('Usage: jevtrace [--root /path/to/project]\n');
-  process.exit(1);
+const queryValues = ['--root', '--task', '--file', '--line', '--symbol', '--evidence', '--provider', '--model', '--endpoint',
+  '--max-candidates', '--max-leads', '--max-files', '--max-jev-files', '--max-relevant-directories', '--max-relevant-files',
+  '--max-depth', '--max-nodes', '--token-budget', '--body-threshold', '--omit-threshold', '--reverse-fan-in',
+  '--per-lead-node-limit', '--per-lead-token-budget', '--neighborhood-token-budget', '--lexical-merge-limit',
+  '--context-ranking', '--visit-policy'];
+const querySwitches = ['--offline', '--no-reverse', '--no-scope-check', '--no-wrapper-lookahead', '--lexical-final-merge', '--include-lexical-parallel'];
+const retrieving = command === 'query' || command === 'discover';
+try {
+  if (retrieving) checkOptions(queryValues, querySwitches);
+  else checkOptions(['--root']);
+} catch (error) {
+  fail(error);
 }
+
 // Without --root, follow the host's project: Claude Code passes it as CLAUDE_PROJECT_DIR and starts
 // user-scope servers from its own configuration directory, so the working directory is not the project.
-const root = path.resolve(rootArgument >= 0 ? process.argv[rootArgument + 1] : process.env.CLAUDE_PROJECT_DIR || process.cwd());
+const root = path.resolve(argument('--root') ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd()));
 // Fail at startup with the reason on stderr (which MCP hosts show in their logs), not at the first request.
 if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
   process.stderr.write(`jevtrace: the project folder ${root} does not exist or is not a folder. Check the --root you registered, or start your agent from the project folder.\n`);
   process.exit(1);
 }
-// Anything that escapes a handler still ends with an explanation, not a bare stack or a silent exit.
-process.on('uncaughtException', error => {
-  process.stderr.write(`jevtrace: ${explainError(error)}\n`);
-  process.exit(1);
-});
-process.on('unhandledRejection', error => {
-  process.stderr.write(`jevtrace: ${explainError(error)}\n`);
-  process.exit(1);
-});
 const unsuitable = unsuitableRoot(root);
-if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
+if (retrieving) {
   if (unsuitable) {
     process.stderr.write(`${unsuitable.replace(/your agent/, 'this command').replace(/start the agent/, 'run it')}\n`);
     process.exit(1);
   }
-  const argument = (name: string): string | undefined => {
-    const index = process.argv.indexOf(name);
-    return index < 0 ? undefined : process.argv[index + 1];
-  };
-  const evidencePath = argument('--evidence');
-  const evidence = evidencePath ? JSON.parse(fs.readFileSync(evidencePath, 'utf8')) as {
-    path: string; leads: Array<{ name: string; range: { startLine: number; endLine: number }; score: number }>
-  } : undefined;
-  const lead = [...(evidence?.leads ?? [])].sort((a, b) => b.score - a.score)[0];
-  const file = argument('--file') ?? evidence?.path;
-  const task = argument('--task');
-  const line = argument('--line') ? Number(argument('--line')) : lead?.range.startLine;
-  if (!task || (file && line === undefined && !argument('--symbol') && !lead) || (!file && (line !== undefined || argument('--symbol') || evidencePath))) {
-    process.stderr.write('Usage: jevtrace query|discover --task TEXT [--file PATH --line N | --file PATH --symbol NAME | --evidence FILE.json] [--root DIR] [--max-candidates 64] [--max-leads 4] [--max-jev-files 256] [--max-relevant-files 8] [--provider openrouter|typesafe|vercel|opencode|custom] [--model MODEL] [--endpoint URL] [--offline]\n');
-    process.exit(1);
-  }
   try {
-    if (!process.argv.includes('--offline') && !argument('--provider') && !configuredProvider() && process.stdin.isTTY) {
+    const evidencePath = argument('--evidence');
+    let evidence: { path?: string; leads?: Array<{ name: string; range: { startLine: number; endLine: number }; score: number }> } | undefined;
+    if (evidencePath) {
+      try {
+        evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+      } catch (error) {
+        throw new UserFacingError(`Cannot read the evidence file ${evidencePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const lead = [...(evidence?.leads ?? [])].sort((a, b) => b.score - a.score)[0];
+    const file = argument('--file') ?? evidence?.path;
+    const task = argument('--task');
+    const line = numberArgument('--line') ?? lead?.range.startLine;
+    if (!task?.trim()) throw new UserFacingError(`\`jevtrace ${command}\` needs --task, for example:\n  jevtrace ${command} --task "Fix refresh token validation" --root /path/to/project`);
+    if (evidencePath && !file) throw new UserFacingError(`The evidence file ${evidencePath} has no "path" to start from.`);
+    if (file && line === undefined && !argument('--symbol')) throw new UserFacingError('--file needs --line N or --symbol NAME to say which declaration to start from.');
+    if (!file && (line !== undefined || argument('--symbol'))) throw new UserFacingError('--line and --symbol need --file PATH.');
+
+    if (!args.includes('--offline') && !argument('--provider') && !configuredProvider() && process.stdin.isTTY) {
       process.stderr.write('No decision provider is configured yet; starting setup (or rerun with --offline).\n\n');
       await runSetup({ output: process.stderr });
     }
-    const judge = process.argv.includes('--offline')
+    const judge = args.includes('--offline')
       ? new IncludeAllJudge()
       : createJudge(process.env, {
         provider: argument('--provider') as JevProvider | undefined,
@@ -113,29 +184,29 @@ if (process.argv[2] === 'query' || process.argv[2] === 'discover') {
     const index = new RepositoryIndex(root);
     const adapter = new TypeScriptAdapter(root);
     const discoveryOptions = {
-      maxCandidates: Number(argument('--max-candidates') ?? 64),
-      maxLeads: Number(argument('--max-leads') ?? 4),
-      maxFiles: Number(argument('--max-files') ?? defaultMaxFiles),
-      maxJevFiles: Number(argument('--max-jev-files') ?? 256),
-      maxRelevantDirectories: Number(argument('--max-relevant-directories') ?? 8),
-      maxRelevantFiles: Number(argument('--max-relevant-files') ?? 8),
+      maxCandidates: numberArgument('--max-candidates', 64),
+      maxLeads: numberArgument('--max-leads', 4),
+      maxFiles: numberArgument('--max-files', defaultMaxFiles),
+      maxJevFiles: numberArgument('--max-jev-files', 256),
+      maxRelevantDirectories: numberArgument('--max-relevant-directories', 8),
+      maxRelevantFiles: numberArgument('--max-relevant-files', 8),
     };
-    const result = process.argv[2] === 'discover' ? await discoverEntries(index, judge, task, discoveryOptions, adapter)
+    const result = command === 'discover' ? await discoverEntries(index, judge, task, discoveryOptions, adapter)
       : await query(index, adapter, judge, task,
       file ? { file, line, endLine: lead?.range.endLine, symbol: argument('--symbol') ?? lead?.name, score: lead?.score } : undefined,
-      { maxDepth: Number(argument('--max-depth') ?? 4), maxNodes: Number(argument('--max-nodes') ?? 30),
+      { maxDepth: numberArgument('--max-depth', 4), maxNodes: numberArgument('--max-nodes', 30),
         ...discoveryOptions,
-        tokenBudget: Number(argument('--token-budget') ?? 8000), bodyThreshold: Number(argument('--body-threshold') ?? 0.3),
-        omitThreshold: Number(argument('--omit-threshold') ?? 0.3), reverse: !process.argv.includes('--no-reverse'),
-        reverseFanIn: Number(argument('--reverse-fan-in') ?? 12),
-        perLeadNodeLimit: Number(argument('--per-lead-node-limit') ?? 24),
-        perLeadTokenBudget: argument('--per-lead-token-budget') ? Number(argument('--per-lead-token-budget')) : undefined,
-        neighborhoodTokenBudget: argument('--neighborhood-token-budget') ? Number(argument('--neighborhood-token-budget')) : undefined,
-        lexicalMergeLimit: Number(argument('--lexical-merge-limit') ?? 64),
-        includeLexicalParallel: process.argv.includes('--lexical-final-merge') || process.argv.includes('--include-lexical-parallel'),
-        contextRanking: argument('--context-ranking') === 'structural' ? 'structural' : 'jev',
-        scopeCheck: !process.argv.includes('--no-scope-check'),
-        wrapperLookahead: !process.argv.includes('--no-wrapper-lookahead'), visitPolicy: argument('--visit-policy') === 'choice' ? 'choice' : 'score' });
+        tokenBudget: numberArgument('--token-budget', 8000), bodyThreshold: numberArgument('--body-threshold', 0.3),
+        omitThreshold: numberArgument('--omit-threshold', 0.3), reverse: !args.includes('--no-reverse'),
+        reverseFanIn: numberArgument('--reverse-fan-in', 12),
+        perLeadNodeLimit: numberArgument('--per-lead-node-limit', 24),
+        perLeadTokenBudget: numberArgument('--per-lead-token-budget'),
+        neighborhoodTokenBudget: numberArgument('--neighborhood-token-budget'),
+        lexicalMergeLimit: numberArgument('--lexical-merge-limit', 64),
+        includeLexicalParallel: args.includes('--lexical-final-merge') || args.includes('--include-lexical-parallel'),
+        contextRanking: choiceArgument('--context-ranking', ['jev', 'structural'], 'jev'),
+        scopeCheck: !args.includes('--no-scope-check'),
+        wrapperLookahead: !args.includes('--no-wrapper-lookahead'), visitPolicy: choiceArgument('--visit-policy', ['score', 'choice'], 'score') });
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
     process.stderr.write(`${explainError(error)}\n`);

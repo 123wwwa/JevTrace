@@ -585,6 +585,24 @@ test('errors are explained with what to do next, and a home directory is refused
   assert.match(explain(new Error('Cannot read properties of undefined')), /unexpected error\. Please report it .*issues/);
   assert.match(explainError(new Error('Cannot read properties of undefined')), /\(Cannot read properties of undefined\)$/, 'the original error is kept for reports');
   assert.equal(explainError(new UserFacingError('Setup cancelled; nothing was saved.')), 'Setup cancelled; nothing was saved.');
+  assert.match(explain(new Error('Decision request failed (401): Unauthorized')), /a running server uses it from the next call\. A key set in the environment/);
+  assert.match(explain(new Error('Jev response has no answers')), /answered in a format JevTrace does not understand/);
+  assert.equal(explainError(AbortSignal.abort().reason), 'The request was cancelled before JevTrace finished.');
+
+  // A wrong setting or option is the caller's to fix, so its message is shown as written.
+  const { createJudge } = await import('../dist/judges.js');
+  const { discoverEntries, RepositoryIndex } = await import('../dist/discovery.js');
+  const thrown = async run => { try { await run(); } catch (error) { return error; } };
+  for (const error of [
+    await thrown(() => createJudge({ JEVTRACE_CONFIG: 'off', JEVTRACE_PROVIDER: 'nope' })),
+    await thrown(() => createJudge({ JEVTRACE_CONFIG: 'off' })),
+    await thrown(() => createJudge({ JEVTRACE_CONFIG: 'off', JEVTRACE_PROVIDER: 'custom' })),
+    await thrown(() => createJudge({ JEVTRACE_CONFIG: 'off', TYPESAFE_API_KEY: 'key', JEVTRACE_JEV_BATCH_SIZE: 'many' })),
+    await thrown(() => discoverEntries(new RepositoryIndex(os.tmpdir()), { name: 'none', judge: async () => new Map() }, 'refresh', { maxLeads: 99 })),
+  ]) {
+    assert.ok(error instanceof UserFacingError, String(error));
+    assert.equal(explainError(error), error.message);
+  }
 
   assert.match(unsuitableRoot(os.homedir()), /started in your home directory .* not in a project/);
   assert.match(unsuitableRoot(path.parse(os.homedir()).root), /started in the filesystem root/);

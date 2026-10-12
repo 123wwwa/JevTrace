@@ -298,3 +298,142 @@ test('started in the home directory, the server still connects and every tool ex
   assert.match(text(result), /--root \/path\/to\/project/);
   assert.match(stderr(), /jevtrace: JevTrace was started in your home directory/);
 });
+
+const packageVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
+test('the server reports the package version', async t => {
+  const { client } = await connect(t, project(t, authProject));
+  assert.deepEqual(client.getServerVersion(), { name: 'jevtrace', version: packageVersion });
+});
+
+test('the CLI answers --help and --version, and names a mistyped command or option instead of starting a server', async t => {
+  const { spawnSync } = await import('node:child_process');
+  const root = project(t, authProject);
+  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', input: '', timeout: 30000,
+    env: { ...getDefaultEnvironment(), JEVTRACE_USAGE_LOG: 'off', JEVTRACE_CONFIG: 'off' } });
+
+  const help = run('--help');
+  assert.equal(help.status, 0, help.stderr);
+  assert.ok(help.stdout.startsWith(`jevtrace ${packageVersion}:`), help.stdout);
+  assert.match(help.stdout, /jevtrace setup/);
+  assert.match(run('query', '--help').stdout, /Usage:/);
+  assert.equal(run('--version').stdout.trim(), packageVersion);
+
+  // These used to start the MCP server, which waited on stdin without a word.
+  const typo = run('setpu');
+  assert.equal(typo.status, 1);
+  assert.match(typo.stderr, /unknown command "setpu"/);
+  assert.match(typo.stderr, /Usage:/);
+  const option = run('--rot', root);
+  assert.equal(option.status, 1);
+  assert.match(option.stderr, /Unknown option --rot\. Run `jevtrace --help`/);
+
+  // A wrong value is the caller's to fix: it is named, not reported as a bug in JevTrace.
+  const failures = [
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--token-budget', 'abc'], /--token-budget needs a number, got "abc"/],
+    [['query', '--root', root, '--task', 'refresh token', '--provider', 'nope'], /Unknown decision provider: nope \(available: /],
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--tokn-budget', '900'], /Unknown option --tokn-budget for `jevtrace query`/],
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--context-ranking', 'fast'], /--context-ranking must be one of jev, structural, got "fast"/],
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--max-leads', '99'], /maxLeads must be between 1 and 8/],
+    [['query', '--root', root, '--offline'], /needs --task, for example/],
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--file', 'src/auth.ts'], /--file needs --line N or --symbol NAME/],
+    [['query', '--root', root, '--task', 'refresh token', '--offline', '--evidence', path.join(root, 'missing.json')], /Cannot read the evidence file /],
+    [['stats', '--days', 'soon'], /--days needs a number, got "soon"/],
+  ];
+  for (const [args, message] of failures) {
+    const result = run(...args);
+    assert.equal(result.status, 1, args.join(' '));
+    assert.match(result.stderr, message, args.join(' '));
+    assert.doesNotMatch(result.stderr, /unexpected error/, args.join(' '));
+  }
+});
+
+test('a wrong tool argument is explained as it is, not as an unexpected error to report', async t => {
+  const { client } = await connect(t, project(t, authProject));
+  const noEntry = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'x' } });
+  assert.equal(text(noEntry), 'Provide an explicit file with line/symbol, or structured evidence with a lead');
+  const missing = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'x', file: 'src/missing.ts', line: 1 } });
+  assert.equal(text(missing), 'Entry file does not exist: src/missing.ts');
+  const ambiguous = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'x', file: 'src/auth.ts', symbol: 'doesNotExist' } });
+  assert.match(text(ambiguous), /^No declaration found at src\/auth\.ts:doesNotExist$/);
+});
+
+test('a rejected key is reported first, and a key saved by setup is used without restarting the server', async t => {
+  const http = await import('node:http');
+  const keys = [];
+  const provider = http.createServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      keys.push(request.headers.authorization);
+      if (request.headers.authorization !== 'Bearer working-key') {
+        response.writeHead(401, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'Invalid API key' } }));
+        return;
+      }
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ answers: Object.fromEntries(Object.keys(JSON.parse(body).questions).map(id => [id, { noul: 0.9 }])) }));
+    });
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => provider.close());
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-config-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const configFile = path.join(scratch, 'config.json');
+  const save = apiKey => fs.writeFileSync(configFile, JSON.stringify({ provider: 'custom', endpoint: `http://127.0.0.1:${provider.address().port}/v1/systemone`, apiKey }));
+
+  save('expired-key');
+  const { client, stderr } = await connect(t, project(t, authProject), { JEVTRACE_JUDGE: '', JEVTRACE_CONFIG: configFile });
+  const call = () => client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'Fix refresh token validation' } });
+  // The retrieval still answers from keyword leads; without the notice that looked like a working JevTrace.
+  const rejected = await call();
+  assert.ok(!rejected.isError, text(rejected));
+  assert.match(text(rejected), /^Jev could not be used for this result, .* Tell the user: The Jev provider rejected the API key\. Run `npx -y jevtrace setup`/);
+  assert.match(stderr(), /jevtrace \(retrieve_dependency_context\): Jev could not be used/);
+  assert.ok(rejected.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+
+  // What `jevtrace setup` does while the agent keeps running.
+  save('working-key');
+  const accepted = await call();
+  assert.ok(!accepted.isError, text(accepted));
+  assert.doesNotMatch(text(accepted), /Jev could not be used/);
+  assert.equal(keys.at(-1), 'Bearer working-key');
+  assert.ok(keys.includes('Bearer expired-key'));
+});
+
+test('usage_stats and `stats` survive a damaged log and unreadable transcripts, and the tool bounds its scan', async t => {
+  const root = project(t, authProject);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-stats-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  // A log with a cut-off line and a record missing its fields, and a `projects` entry that is not a folder.
+  const logFile = path.join(scratch, 'usage.jsonl');
+  const entry = { time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: root, task: 'refresh token', ok: true, ms: 1200, outcome: 'complete' };
+  fs.writeFileSync(logFile, [JSON.stringify(entry), '{"time":"2026-', JSON.stringify({ time: entry.time }), 'null', ''].join('\n'));
+  const brokenClaude = path.join(scratch, 'broken');
+  fs.mkdirSync(brokenClaude);
+  fs.writeFileSync(path.join(brokenClaude, 'projects'), 'not a folder');
+  const { client } = await connect(t, root, { JEVTRACE_USAGE_LOG: logFile, CLAUDE_CONFIG_DIR: brokenClaude });
+  const stats = await client.callTool({ name: 'usage_stats', arguments: {} });
+  assert.ok(!stats.isError, text(stats));
+  assert.match(text(stats), /Tool calls: 1 \(retrieve_dependency_context 1\)/);
+  assert.match(text(stats), /Claude Code sessions with code search: 0/);
+
+  // Newest transcripts are read first; past the byte budget the rest are counted, not read.
+  const { formatStats, scanClaudeSessions } = await import('../dist/stats.js');
+  const claudeDir = path.join(scratch, 'claude');
+  const sessionDir = path.join(claudeDir, 'projects', 'demo');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const toolUse = name => JSON.stringify({ type: 'assistant', cwd: '/work/demo', message: { content: [{ type: 'tool_use', name, input: {} }] } });
+  fs.writeFileSync(path.join(sessionDir, 'old.jsonl'), toolUse('Grep'));
+  fs.writeFileSync(path.join(sessionDir, 'new.jsonl'), toolUse('mcp__jevtrace__retrieve_dependency_context'));
+  fs.utimesSync(path.join(sessionDir, 'old.jsonl'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  const env = { JEVTRACE_USAGE_LOG: 'off', CLAUDE_CONFIG_DIR: claudeDir };
+  const newestSize = fs.statSync(path.join(sessionDir, 'new.jsonl')).size;
+  const all = scanClaudeSessions(0, env);
+  assert.deepEqual([all.sessions.map(session => path.basename(session.file)), all.unscanned], [['new.jsonl', 'old.jsonl'], 0]);
+  const bounded = scanClaudeSessions(0, env, newestSize);
+  assert.deepEqual([bounded.sessions.map(session => path.basename(session.file)), bounded.unscanned], [['new.jsonl'], 1]);
+  assert.match(formatStats(1, env, newestSize), /1 older or unreadable session transcript was not scanned; `npx -y jevtrace stats --days 1` in a terminal reads them all\./);
+  assert.doesNotMatch(formatStats(1, env), /not scanned/);
+});
+

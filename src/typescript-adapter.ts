@@ -5,6 +5,7 @@ import type { CodeNode, Dependency, DependencyScan, EdgeKind, EntryInput, Langua
 import { parseProjectConfigs, selectProjectFromParsed, type ParsedProjectConfig } from './project-config.js';
 import { isVueFile, scriptText, vueScript } from './vue.js';
 import { readDirectory } from './fs-walk.js';
+import { UserFacingError } from './errors.js';
 
 const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs', '.vue']);
 const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next']);
@@ -169,7 +170,7 @@ export class TypeScriptAdapter implements LanguageAdapter {
     const absolute = this.safePath(input.file);
     this.loadProgram(absolute);
     const source = this.program!.getSourceFile(absolute);
-    if (!source) throw new Error(`File is not in its TypeScript project: ${input.file}`);
+    if (!source) throw new UserFacingError(`File is not in its TypeScript project: ${input.file}`);
     const matches: Array<{ node: ts.Node; name: string }> = [];
     const visit = (node: ts.Node, parents: string[]) => {
       const name = named(node);
@@ -185,9 +186,9 @@ export class TypeScriptAdapter implements LanguageAdapter {
       ts.forEachChild(node, child => visit(child, ts.isClassDeclaration(node) && name ? current : parents));
     };
     visit(source, []);
-    if (!matches.length) throw new Error(`No declaration found at ${input.file}:${input.line ?? input.symbol}`);
+    if (!matches.length) throw new UserFacingError(`No declaration found at ${input.file}:${input.line ?? input.symbol}`);
     matches.sort((a, b) => (a.node.getEnd() - a.node.getStart(source)) - (b.node.getEnd() - b.node.getStart(source)));
-    if (input.line === undefined && matches.length > 1) throw new Error(`Symbol ${input.symbol} is ambiguous; supply a line`);
+    if (input.line === undefined && matches.length > 1) throw new UserFacingError(`Symbol ${input.symbol} is ambiguous; supply a line`);
     return this.toCodeNode(matches[0].node, matches[0].name);
   }
 
@@ -563,8 +564,8 @@ export class TypeScriptAdapter implements LanguageAdapter {
   }
   private safePath(file: string): string {
     const absolute = path.resolve(this.root, file);
-    if (!this.insideRoot(absolute)) throw new Error('Entry file must be inside project root');
-    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) throw new Error(`Entry file does not exist: ${file}`);
+    if (!this.insideRoot(absolute)) throw new UserFacingError('Entry file must be inside project root');
+    if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) throw new UserFacingError(`Entry file does not exist: ${file}`);
     return absolute;
   }
   private insideRoot(file: string): boolean {

@@ -10,7 +10,9 @@ import { RepositoryIndex, defaultMaxFiles, describeUnanalysed, discoverEntries, 
 import type { TaskPipelineResult } from './task-pipeline.js';
 import { formatContextSavings, RetrievalLatencyWindow, SessionSavings, summarizeContextSavings } from './context-metrics.js';
 import { formatStats } from './stats.js';
-import { appendUsage, jevUsage } from './usage-log.js';
+import { appendUsage, jevUsage, type UsageTool } from './usage-log.js';
+import { userConfigStamp } from './user-config.js';
+import { version } from './version.js';
 import { explainError, UserFacingError } from './errors.js';
 import { unsuitableRoot } from './fs-walk.js';
 import type { JudgeCallStats } from './types.js';
@@ -35,8 +37,25 @@ function compactDiscovery(discovery: DiscoveryResult) {
   };
 }
 
+/**
+ * A provider failure does not fail a retrieval: discovery falls back to keyword leads and ranking to structural
+ * order, each leaving a warning at the end of the result. A rejected key or an empty balance therefore looked
+ * like a working JevTrace with worse results. This puts the reason and the fix first.
+ */
+function providerNotice(warnings: string[]): string {
+  const failed = warnings.find(warning => /^(Jev discovery failed|Context ranking failed|Task scope check failed)/.test(warning));
+  if (!failed) return '';
+  const explained = explainError(new Error(failed));
+  // A failure `explainError` has no words for is shown as it is, rather than as a request to report it.
+  const reason = explained.startsWith('JevTrace hit an unexpected error') ? failed : explained.split('\n')[0];
+  return `Jev could not be used for this result, so it is ranked by keywords and code structure only. Tell the user: ${reason}\n`;
+}
+
+/** Transcript bytes `usage_stats` reads per call: about half a second, during which the server answers nothing else. */
+const statsScanBytes = 64 * 1024 * 1024;
+
 export function createServer(root = process.cwd()): McpServer {
-  const server = new McpServer({ name: 'jevtrace', version: '0.1.0' }, {
+  const server = new McpServer({ name: 'jevtrace', version }, {
     // A benchmark found agents skipping JevTrace whenever the task named a keyword ("Retry-After"): an earlier
     // "read it directly if you know the symbol" clause gave them the reason. The call is worth making anyway,
     // since a keyword search does not bring the callers, types and tests.
@@ -54,16 +73,31 @@ export function createServer(root = process.cwd()): McpServer {
     return adapter;
   };
   const index = new RepositoryIndex(projectRoot);
-  /** The tool result for a failure, also written to stderr, which MCP hosts keep in their logs. */
-  const failure = (tool: string, task: string, error: unknown) => {
+  /**
+   * The tool result for a failure, also written to stderr, which MCP hosts keep in their logs. A retrieval
+   * (`call`) is recorded in the usage log as well.
+   */
+  const failure = (tool: string, error: unknown, call?: { tool: UsageTool; task: string }) => {
     const text = explainError(error);
     process.stderr.write(`jevtrace (${tool}): ${text}\n`);
-    appendUsage({ time: new Date().toISOString(), tool: tool as 'retrieve_dependency_context', project: projectRoot, task, ok: false, ms: 0, outcome: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 300) });
+    if (call) appendUsage({ time: new Date().toISOString(), tool: call.tool, project: projectRoot, task: call.task, ok: false, ms: 0, outcome: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 300) });
     return { isError: true, content: [{ type: 'text' as const, text }] };
   };
   const retrievalLatencies = new RetrievalLatencyWindow(50);
   const sessionSavings = new SessionSavings();
+  // Rebuilt when the saved config changes: after `jevtrace setup` fixes a rejected key, the next call uses the
+  // new one without restarting the agent. A config that no longer loads is reported, not silently ignored.
   let judge: ReturnType<typeof createJudge> | undefined;
+  let judgeConfig: string | undefined;
+  const currentJudge = (): ReturnType<typeof createJudge> => {
+    const stamp = userConfigStamp();
+    if (!judge || stamp !== judgeConfig) {
+      judge = undefined;
+      judge = createJudge();
+      judgeConfig = stamp;
+    }
+    return judge;
+  };
   // The adapter owns one active TS project; do not switch it during another request's await.
   let retrievalTail: Promise<void> = Promise.resolve();
   const serialize = async <T>(work: () => Promise<T>): Promise<T> => {
@@ -99,11 +133,11 @@ export function createServer(root = process.cwd()): McpServer {
   }, async ({ task, scopeCheck, tokenBudget, reverseFanIn, perLeadNodeLimit, perLeadTokenBudget, neighborhoodTokenBudget, lexicalMergeLimit, includeLexicalParallel, contextRanking, maxChars, maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles }, context) => {
     try {
       const started = performance.now();
-      judge ??= createJudge();
+      const judge = currentJudge();
       // Select only what the text can show: a token is estimated as four characters, and headings,
       // relationship labels and the omitted/not-followed lists take roughly 5,000 more.
       const effectiveBudget = Math.max(500, Math.min(tokenBudget, Math.floor((maxChars - 5000) / 4)));
-      const result = await serialize(() => query(index, project(), judge!, task, undefined, {
+      const result = await serialize(() => query(index, project(), judge, task, undefined, {
         tokenBudget: effectiveBudget, reverseFanIn,
         maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles,
         perLeadNodeLimit, perLeadTokenBudget, neighborhoodTokenBudget,
@@ -120,10 +154,13 @@ ${result.map}`.slice(0, maxChars);
         return { content: [{ type: 'text', text }],
           structuredContent: { context: text, task, status: result.status, specificity: result.specificity, session: sessionSavings.snapshot() } };
       }
+      const notice = providerNotice([...result.warnings, ...(result.discovery?.warnings ?? [])]);
+      if (notice) process.stderr.write(`jevtrace (retrieve_dependency_context): ${notice}`);
       if (result.status === 'not-covered') {
         appendUsage({ time: new Date().toISOString(), tool: 'retrieve_dependency_context', project: projectRoot, task, ok: true,
           ms: Math.round(performance.now() - started), outcome: 'not-covered', ...jevUsage(result.discovery.judgeStats) });
         const text = [
+          ...(notice ? [notice.trimEnd()] : []),
           'Not covered: this task is about sources JevTrace does not analyse (outside every tsconfig/jsconfig include and not imported by included files), so it returned no code.',
           `Search these directly with Grep/Read instead of calling JevTrace again for this task: ${describeUnanalysed(result.discovery.unanalysedLeads, 12)}`,
           ...result.warnings.map(warning => `Warning: ${warning}`),
@@ -133,7 +170,7 @@ ${result.map}`.slice(0, maxChars);
             unanalysed: result.discovery.unanalysedLeads.map(lead => ({ directory: lead.directory, score: lead.score, files: lead.files.slice(0, 50) })),
             session: sessionSavings.snapshot() } };
       }
-      const discoveryText = result.discovery ? `Entry discovery (${result.discovery.mode}): ${result.discovery.selected ? `${result.discovery.selected.file}:${result.discovery.selected.line}` : 'no suitable entry'}\n` : '';
+      const discoveryText = notice + (result.discovery ? `Entry discovery (${result.discovery.mode}): ${result.discovery.selected ? `${result.discovery.selected.file}:${result.discovery.selected.line}` : 'no suitable entry'}\n` : '');
       if ('items' in result) {
         const totalMs = performance.now() - started;
         const latencyStats = retrievalLatencies.record(totalMs);
@@ -164,7 +201,7 @@ ${result.map}`.slice(0, maxChars);
       return { content: [{ type: 'text', text }],
         structuredContent: { context: text, task, status: result.status, warnings: result.warnings, discovery: compactDiscovery(result.discovery), session: sessionSavings.snapshot() } };
     } catch (error) {
-      return failure('retrieve_dependency_context', task, error);
+      return failure('retrieve_dependency_context', error, { tool: 'retrieve_dependency_context', task });
     }
   });
 
@@ -197,9 +234,9 @@ ${result.map}`.slice(0, maxChars);
       const started = performance.now();
       const lead = [...(evidence?.leads ?? [])].sort((a, b) => b.score - a.score)[0];
       const entryFile = file ?? evidence?.path;
-      if (!entryFile || (line === undefined && !lead && !symbol)) throw new Error('Provide an explicit file with line/symbol, or structured evidence with a lead');
-      judge ??= createJudge();
-      const result = await serialize(() => query(index, project(), judge!, task,
+      if (!entryFile || (line === undefined && !lead && !symbol)) throw new UserFacingError('Provide an explicit file with line/symbol, or structured evidence with a lead');
+      const judge = currentJudge();
+      const result = await serialize(() => query(index, project(), judge, task,
         { file: entryFile, line: line ?? lead?.range.startLine, endLine: endLine ?? lead?.range.endLine, symbol: symbol ?? lead?.name, score: lead?.score },
         { maxDepth, maxNodes, tokenBudget, bodyThreshold, omitThreshold, visitPolicy, wrapperLookahead, reverse, reverseFanIn, signal: context.mcpReq.signal }));
       appendUsage({ time: new Date().toISOString(), tool: 'retrieve_from_entry', project: projectRoot, task, ok: true, ms: Math.round(performance.now() - started),
@@ -209,7 +246,7 @@ ${result.map}`.slice(0, maxChars);
         structuredContent: { context: text, task, status: result.status, warnings: result.warnings, usedTokens: result.usedTokens, tokenBudget: result.tokenBudget,
           entry: nodeRef(result.entry), items: compactItems(result.items), omittedCount: result.omitted.length } };
     } catch (error) {
-      return failure('retrieve_from_entry', task, error);
+      return failure('retrieve_from_entry', error, { tool: 'retrieve_from_entry', task });
     }
   });
   server.registerTool('discover_entries', {
@@ -226,8 +263,8 @@ ${result.map}`.slice(0, maxChars);
   }, async ({ task, maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles }, context) => {
     try {
       const started = performance.now();
-      judge ??= createJudge();
-      const result = await serialize(() => discoverEntries(index, judge!, task,
+      const judge = currentJudge();
+      const result = await serialize(() => discoverEntries(index, judge, task,
         { maxCandidates, maxLeads, maxFiles, maxJevFiles, maxRelevantDirectories, maxRelevantFiles, signal: context.mcpReq.signal }, project()));
       appendUsage({ time: new Date().toISOString(), tool: 'discover_entries', project: projectRoot, task, ok: true, ms: Math.round(performance.now() - started),
         outcome: result.status, ...jevUsage(result.judgeStats) });
@@ -241,7 +278,7 @@ ${result.map}`.slice(0, maxChars);
       ].join('\n');
       return { content: [{ type: 'text', text }], structuredContent: summary };
     } catch (error) {
-      return failure('discover_entries', task, error);
+      return failure('discover_entries', error, { tool: 'discover_entries', task });
     }
   });
   server.registerTool('usage_stats', {
@@ -251,12 +288,16 @@ ${result.map}`.slice(0, maxChars);
       days: z.number().int().min(1).max(3650).default(30).describe('How many past days of the usage log to summarize'),
     }),
   }, async ({ days }) => {
-    const session = sessionSavings.snapshot();
-    const current = session.retrievals
-      ? `This server session: ${session.savedTokens.toLocaleString('en-US')} tokens excluded from ${session.candidateTokens.toLocaleString('en-US')} candidates across ${session.retrievals} retrieval${session.retrievals === 1 ? '' : 's'} (${(session.reductionPercent * 100).toFixed(1)}%).`
-      : 'This server session: no retrievals yet.';
-    const text = `${formatStats(days)}\n\n${current}`;
-    return { content: [{ type: 'text', text }], structuredContent: { days, session } };
+    try {
+      const session = sessionSavings.snapshot();
+      const current = session.retrievals
+        ? `This server session: ${session.savedTokens.toLocaleString('en-US')} tokens excluded from ${session.candidateTokens.toLocaleString('en-US')} candidates across ${session.retrievals} retrieval${session.retrievals === 1 ? '' : 's'} (${(session.reductionPercent * 100).toFixed(1)}%).`
+        : 'This server session: no retrievals yet.';
+      const text = `${formatStats(days, process.env, statsScanBytes)}\n\n${current}`;
+      return { content: [{ type: 'text', text }], structuredContent: { days, session } };
+    } catch (error) {
+      return failure('usage_stats', error);
+    }
   });
   return server;
 }

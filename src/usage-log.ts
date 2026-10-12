@@ -8,9 +8,11 @@ import type { JudgeCallStats } from './types.js';
  * (`jevtrace stats`). Set JEVTRACE_USAGE_LOG to a file path to move it, or to `off` to disable it.
  * It records the task text and project path; nothing is sent anywhere.
  */
+export type UsageTool = 'retrieve_dependency_context' | 'retrieve_from_entry' | 'discover_entries';
+
 export interface UsageEntry {
   time: string;
-  tool: 'retrieve_dependency_context' | 'retrieve_from_entry' | 'discover_entries';
+  tool: UsageTool;
   project: string;
   task: string;
   ok: boolean;
@@ -59,6 +61,12 @@ export function readUsage(env: NodeJS.ProcessEnv = process.env): UsageEntry[] {
   if (!file || !fs.existsSync(file)) return [];
   return fs.readFileSync(file, 'utf8').split('\n').flatMap(line => {
     if (!line.trim()) return [];
-    try { return [JSON.parse(line) as UsageEntry]; } catch { return []; }
+    // A truncated or hand-edited line is dropped rather than failing the summary.
+    try {
+      const entry = JSON.parse(line) as Partial<UsageEntry> | null;
+      const complete = entry && typeof entry.time === 'string' && typeof entry.tool === 'string' && typeof entry.project === 'string'
+        && typeof entry.task === 'string' && typeof entry.outcome === 'string' && typeof entry.ms === 'number';
+      return complete ? [entry as UsageEntry] : [];
+    } catch { return []; }
   });
 }

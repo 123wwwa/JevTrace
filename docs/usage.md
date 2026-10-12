@@ -186,7 +186,7 @@ Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, revers
 
 Nothing is shown in the chat on its own. Every task-only result ends with a short `Session so far:` line for the agent, and the same totals are in the structured result as `contextSavings.session`. To see the savings when you want to:
 
-- **Ask the agent**, for example "How many tokens has JevTrace saved?". It calls the `usage_stats` tool, which returns the usage-log summary for the last 30 days (or `days`) plus the totals since this server started. The tool is described to agents as for that question only, so it is not called during coding tasks.
+- **Ask the agent**, for example "How many tokens has JevTrace saved?". It calls the `usage_stats` tool, which returns the usage-log summary for the last 30 days (or `days`) plus the totals since this server started. The tool is described to agents as for that question only, so it is not called during coding tasks. To answer quickly it reads the newest 64 MB of session transcripts and says how many older ones it left out; `stats` in a terminal reads them all.
 - **Run `stats`** in a terminal (see [Usage log and `stats`](#usage-log-and-stats)).
 
 The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.

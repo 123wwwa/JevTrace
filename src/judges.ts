@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import type { Candidate, CodeNode, FileDiscoveryContext, JudgeCallResult, Judgment, ProviderBatchStats, RelevanceJudge, TaskScopeJudgment } from './types.js';
 import { readUserConfig } from './user-config.js';
 import { JevBackend, providers, type DecisionBackend, type DecisionRequest, type DecisionResult, type DecisionUsage, type ProviderSpec } from './decision-backends.js';
+import { UserFacingError } from './errors.js';
 
 // Useful for local/offline operation and for measuring the graph's unfiltered recall.
 export class IncludeAllJudge implements RelevanceJudge {
@@ -33,7 +34,7 @@ export class DecisionJudge implements RelevanceJudge {
   ) {
     this.name = judgeName;
     if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 64)
-      throw new Error('Decision batch size must be an integer between 1 and 64');
+      throw new UserFacingError('The Jev batch size (JEVTRACE_JEV_BATCH_SIZE) must be a whole number from 1 to 64');
   }
 
   private async acquire(signal?: AbortSignal): Promise<() => void> {
@@ -328,7 +329,7 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
   const legacy = env.JEVTRACE_JUDGE;
   if (legacy === 'include-all') return new IncludeAllJudge();
   if (legacy && legacy !== 'jev' && legacy !== 'openrouter-jev') {
-    throw new Error(`Unknown relevance judge: ${legacy}`);
+    throw new UserFacingError(`Unknown relevance judge: ${legacy}`);
   }
 
   // No provider is preferred: an explicit choice (flag, JEVTRACE_PROVIDER, `jevtrace setup`) wins, and
@@ -341,7 +342,7 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
     ?? (config?.provider as JevProvider | undefined)
     ?? (keyed.length === 1 ? keyed[0] : undefined);
   if (!provider) {
-    throw new Error(keyed.length > 1
+    throw new UserFacingError(keyed.length > 1
       ? `Several provider keys are set (${keyed.map(name => providers[name].keyEnv).join(', ')}); choose one with JEVTRACE_PROVIDER or \`npx -y jevtrace setup\``
       : 'No decision provider is configured. Run `npx -y jevtrace setup` in a terminal to choose one and enter its API key, set JEVTRACE_PROVIDER and its key in the environment, or use --offline');
   }
@@ -350,17 +351,17 @@ export function createJudge(env: NodeJS.ProcessEnv = process.env, overrides: Jud
   const batchSize = Number(env.JEVTRACE_JEV_BATCH_SIZE ?? 16);
   if (provider === 'custom') {
     const endpoint = overrides.endpoint ?? env.JEVTRACE_ENDPOINT ?? saved?.endpoint;
-    if (!endpoint) throw new Error('JEVTRACE_ENDPOINT is required for JEVTRACE_PROVIDER=custom');
+    if (!endpoint) throw new UserFacingError('JEVTRACE_ENDPOINT is required for JEVTRACE_PROVIDER=custom');
     const model = overrides.model ?? env.JEVTRACE_MODEL ?? saved?.model ?? 'jev-latest';
     return new JevJudge(env.JEVTRACE_API_KEY ?? saved?.apiKey ?? '', endpoint, model, 0.5, batchSize, 'custom-jev');
   }
   if (!Object.hasOwn(providers, provider)) {
-    throw new Error(`Unknown decision provider: ${provider} (available: ${[...Object.keys(providers), 'custom'].join(', ')})`);
+    throw new UserFacingError(`Unknown decision provider: ${provider} (available: ${[...Object.keys(providers), 'custom'].join(', ')})`);
   }
 
   const spec: ProviderSpec = providers[provider];
   const apiKey = (spec.keyEnv ? env[spec.keyEnv] : undefined) ?? saved?.apiKey;
-  if (spec.keyEnv && !apiKey) throw new Error(`No API key for ${spec.label}: run \`npx -y jevtrace setup\` or set ${spec.keyEnv}`);
+  if (spec.keyEnv && !apiKey) throw new UserFacingError(`No API key for ${spec.label}: run \`npx -y jevtrace setup\` or set ${spec.keyEnv}`);
   const model = overrides.model ?? env.JEVTRACE_MODEL
     ?? (provider === 'openrouter' ? env.JEVTRACE_OPENROUTER_JEV_MODEL : undefined)
     ?? (provider === 'typesafe' ? env.JEVTRACE_JEV_MODEL : undefined)
