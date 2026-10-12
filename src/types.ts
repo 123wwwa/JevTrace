@@ -1,4 +1,5 @@
-export type EdgeKind = 'import' | 'call' | 'new' | 'method' | 'jsx' | 'type' | 'value' | 'sibling' | 'caller' | 'test' | 'lexical';
+/** `argument`: what a caller passes into one of the lead's parameters (a callback, or the function that computed the value). */
+export type EdgeKind = 'import' | 'call' | 'new' | 'method' | 'jsx' | 'type' | 'value' | 'sibling' | 'caller' | 'test' | 'lexical' | 'argument';
 export type ContextLevel = 'body' | 'signature' | 'omitted';
 
 export interface SourceLocation { file: string; line: number; endLine?: number; text?: string }
@@ -21,6 +22,8 @@ export interface Dependency {
   kind: EdgeKind;
   target: CodeNode;
   site: SourceLocation;
+  /** For `argument` edges: the lead's parameter the value is passed into. */
+  parameter?: string;
 }
 
 export interface Unresolved { kind: EdgeKind; site: SourceLocation; expression: string; reason: string }
@@ -40,6 +43,8 @@ export interface LanguageAdapter {
   /** `values` also follows references to module-level constants (configuration objects, tables). */
   dependencies(node: CodeNode, options?: { values?: boolean }): DependencyScan;
   reverseDependencies(node: CodeNode): DependencyScan;
+  /** Where the values passed into this function's parameters come from, at its callers' call sites. */
+  argumentSources?(node: CodeNode): DependencyScan;
   supportingContext?(node: CodeNode): SupportingContext[];
 }
 

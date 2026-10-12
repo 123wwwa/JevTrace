@@ -28,6 +28,10 @@ export interface NeighborhoodItem {
   leadNames: string[];
   sources: Array<'semantic-lead' | 'compiler' | 'lexical'>;
   site?: SourceLocation;
+  /** The lead's callee this item was reached through (callees of callees). */
+  via?: string;
+  /** For `argument` items: the lead's parameter the value is passed into. */
+  parameter?: string;
   structuralScore: number;
   semanticScore?: number;
   finalScore?: number;
@@ -67,6 +71,11 @@ const capCost = (used: number, item: NeighborhoodItem, cap: number): number | un
     : used + signatureTokens(item.node) <= cap ? signatureTokens(item.node) : undefined;
 const maxTestCallersPerLead = 3;
 const maxSiblingsPerLead = 4;
+/** Callees of the lead's callees kept per lead, and their prior: below siblings, above bare type references. */
+const maxNestedCalleesPerLead = 4;
+const nestedCalleePrior = 0.58;
+/** Function calls only: a constructed class brings its whole body (or an outline) rather than the code that runs. */
+const callKinds = new Set<EdgeKind>(['call', 'method', 'import']);
 /** Above this many estimated tokens a non-lead class is returned as its member outline. */
 const largeClassTokens = 800;
 /** Across all leads; leads are expanded best-first, so the strongest leads' tests are kept. */
@@ -87,6 +96,7 @@ const edgePrior: Record<EdgeKind, number> = {
   import: 0.72,
   type: 0.55,
   lexical: 0.5,
+  argument: 0.9,
 };
 const stopWords = new Set(['a', 'an', 'the', 'is', 'are', 'to', 'of', 'for', 'in', 'on', 'and', 'or', 'how', 'change', 'fix', 'add', 'implement', 'with', 'when', 'should', 'from']);
 const taskTokens = (text: string): Set<string> => new Set(
@@ -201,6 +211,9 @@ export async function retrieveTaskContext(
       target.set(item.node.id, { ...item, kinds: [...item.kinds], leadIds: [...item.leadIds], leadNames: [...item.leadNames], sources: [...item.sources] });
       return;
     }
+    // `via` belongs to the closest relation: a direct neighbour also reached through another callee keeps none.
+    if (item.depth < existing.depth) existing.via = item.via;
+    existing.parameter ??= item.parameter;
     existing.structuralScore = Math.max(existing.structuralScore, item.structuralScore);
     existing.semanticScore = Math.max(existing.semanticScore ?? 0, item.semanticScore ?? 0) || undefined;
     existing.depth = Math.min(existing.depth, item.depth) as 0 | 1 | 2;
@@ -243,7 +256,12 @@ export async function retrieveTaskContext(
 
     const forward = adapter.dependencies(node, { values: true });
     const reverse = adapter.reverseDependencies(node);
-    unresolved.push(...forward.unresolved, ...reverse.unresolved);
+    // Arguments: what callers pass into the lead's parameters (a callback, or the function that computed a
+    // value such as a distance field). The lead's body only shows the parameter name, and a call through a
+    // parameter is no longer an unresolved reference once its source is known.
+    const argumentScan = adapter.argumentSources?.(node).edges ?? [];
+    const tracedParameters = new Set(argumentScan.map(edge => edge.parameter));
+    unresolved.push(...forward.unresolved.filter(item => !tracedParameters.has(item.expression)), ...reverse.unresolved);
     // Most task-related callers first. Tests are capped per lead: a widely used helper can have dozens of
     // test callers, and in real use they crowded out implementation code without helping the agent.
     const rankedReverse = reverse.edges
@@ -279,20 +297,41 @@ export async function retrieveTaskContext(
         siblingEdges.push({ ...next, kind: 'sibling' });
       }
     }
-    const candidates = [...forward.edges.filter(edge => !insideLead(edge.target)), ...reverseEdges, ...siblingEdges].map(edge => ({
+    const argumentEdges = argumentScan.filter(edge => !insideLead(edge.target));
+    // Callees of callees: the lead often delegates the work (itemValue → equipScore), and a question about cost
+    // or behaviour needs the code that does it. One bounded hop, the most task-related first.
+    const direct = new Set([node.id, ...forward.edges.map(edge => edge.target.id)]);
+    const nested: Array<{ edge: Dependency; via: string; taskScore: number; order: number }> = [];
+    for (const edge of forward.edges) {
+      if (!callKinds.has(edge.kind) || edge.target.external || edge.target.outline || insideLead(edge.target)) continue;
+      const within = (target: CodeNode) => target.file === edge.target.file && target.startLine >= edge.target.startLine && target.endLine <= edge.target.endLine;
+      for (const next of adapter.dependencies(edge.target).edges) {
+        if (!callKinds.has(next.kind) || next.target.external || next.target.outline || direct.has(next.target.id) || insideLead(next.target) || within(next.target)) continue;
+        direct.add(next.target.id);
+        nested.push({ edge: next, via: edge.target.name, taskScore: lexicalEdgeScore(next.target.name, next.target.file, next.site, terms), order: nested.length });
+      }
+    }
+    const nestedEdges = nested.sort((a, b) => b.taskScore - a.taskScore || a.order - b.order).slice(0, maxNestedCalleesPerLead);
+    const toCandidate = (edge: Dependency, via?: string) => ({
       item: {
         node: edge.target,
-        depth: (edge.kind === 'sibling' ? 2 : 1) as 1 | 2,
+        depth: (edge.kind === 'sibling' || via ? 2 : 1) as 1 | 2,
         kinds: [edge.kind],
         leadIds: [node.id],
         leadNames: [node.name],
         sources: ['compiler'] as Array<'compiler'>,
         site: edge.site,
-        structuralScore: edgePrior[edge.kind],
+        ...(via ? { via } : {}),
+        ...(edge.parameter ? { parameter: edge.parameter } : {}),
+        structuralScore: via ? nestedCalleePrior : edgePrior[edge.kind],
         estimatedTokens: estimate(edge.target),
       } satisfies NeighborhoodItem,
       taskScore: lexicalEdgeScore(edge.target.name, edge.target.file, edge.site, terms),
-    }));
+    });
+    const candidates = [
+      ...[...forward.edges.filter(edge => !insideLead(edge.target)), ...reverseEdges, ...siblingEdges, ...argumentEdges].map(edge => toCandidate(edge)),
+      ...nestedEdges.map(({ edge, via }) => toCandidate(edge, via)),
+    ];
     for (const { item } of candidates) merge(rawCompiler, item);
 
     candidates.sort((a, b) =>
@@ -502,17 +541,20 @@ export async function retrieveTaskContext(
   if (omittedPool.length) notes.push(`${omittedPool.length} ranking-pool candidates were omitted by final tokenBudget=${tokenBudget}`);
 
   const primaryLead = semanticLeads[0];
+  const lead = (item: NeighborhoodItem) => item.depth === 0 && item.sources.includes('semantic-lead');
   const toContextItem = (item: NeighborhoodItem, level: 'body' | 'signature' | 'omitted'): ContextItem => ({
     node: item.node,
     level: item.node.external && level === 'body' ? 'signature' : level,
     path: item.leadNames.length
-      ? [item.leadNames[0], item.node.name]
+      ? [item.leadNames[0], ...(item.via && !lead(item) ? [item.via] : []), item.node.name]
       : [item.node.name],
     from: item.leadIds[0],
-    kind: item.kinds[0],
+    // A lead that another lead also reaches is still shown as a lead, not as that lead's neighbour.
+    kind: lead(item) ? undefined : item.kinds[0],
     site: item.site,
     depth: item.depth,
     score: item.finalScore,
+    ...(item.parameter && !lead(item) ? { parameter: item.parameter } : {}),
   });
   const items = selected.map(item => toContextItem(item, levels.get(item)!));
   const omitted = omittedPool.map(item => toContextItem(item, 'omitted'));

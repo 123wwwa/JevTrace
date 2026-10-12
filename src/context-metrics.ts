@@ -73,6 +73,9 @@ export interface ContextSavingsSummary {
   candidateSymbols?: number;
   returnedSymbols: number;
   omittedSymbols: number;
+  /** Repository files the returned code comes from, and their size read whole (the comparison an agent can act on). */
+  files?: number;
+  fileTokens?: number;
   rawNeighborhoodTokens?: number;
   cappedNeighborhoodTokens?: number;
   semanticLeads?: number;
@@ -103,8 +106,12 @@ const attempts = (result: QuerySuccess): number => {
   return traversalRequests + discoveryRequests;
 };
 
-export function summarizeContextSavings(result: QuerySuccess, totalMs: number, latencyStats?: RetrievalLatencyStats, session?: SessionSavings): ContextSavingsSummary {
+export function summarizeContextSavings(result: QuerySuccess, totalMs: number, latencyStats?: RetrievalLatencyStats, session?: SessionSavings,
+  fileTokens?: (file: string) => number | undefined): ContextSavingsSummary {
   const candidateTokens = result.rankingPool?.stats.tokens;
+  const files = [...new Set(result.items.filter(item => !item.node.external).map(item => item.node.file))];
+  const sizes = fileTokens ? files.map(fileTokens) : [];
+  const wholeFiles = sizes.length && sizes.every(size => size !== undefined) ? sizes.reduce((sum, size) => sum! + size!, 0) : undefined;
   const savedTokens = candidateTokens === undefined ? undefined : Math.max(0, candidateTokens - result.usedTokens);
   const reductionPercent = candidateTokens && savedTokens !== undefined ? savedTokens / candidateTokens : undefined;
 
@@ -121,6 +128,8 @@ export function summarizeContextSavings(result: QuerySuccess, totalMs: number, l
     candidateSymbols: result.rankingPool?.stats.symbols,
     returnedSymbols: result.items.length,
     omittedSymbols: result.omitted.length,
+    files: files.length,
+    fileTokens: wholeFiles,
     rawNeighborhoodTokens: result.neighborhood?.stats.rawTokens,
     cappedNeighborhoodTokens: result.neighborhood?.stats.cappedTokens,
     semanticLeads: result.semanticLeads?.length,
@@ -136,13 +145,16 @@ export function summarizeContextSavings(result: QuerySuccess, totalMs: number, l
   };
 }
 
+/**
+ * One line for the agent: what came back, against the files it comes from read whole, which is what the agent
+ * would otherwise open. The ranking-pool reduction stays in the dashboard; measured against JevTrace's own
+ * candidate pool, it said nothing about the reading the agent was spared.
+ */
 export function formatContextSavings(summary: ContextSavingsSummary): string {
-  if (!summary.available || summary.candidateTokens === undefined || summary.savedTokens === undefined || summary.reductionPercent === undefined) {
-    return `Estimated returned context: ${summary.returnedTokens.toLocaleString()} tokens (explicit-entry path; no comparable ranking pool).`;
-  }
-
-  const line = `Estimated context: ${summary.candidateTokens.toLocaleString()} → ${summary.returnedTokens.toLocaleString()} tokens (${(summary.reductionPercent * 100).toFixed(1)}% reduction, ${summary.savedTokens.toLocaleString()} tokens excluded).`;
-  const session = summary.session;
-  if (!session?.retrievals) return line;
-  return `${line}\nSession so far: ${session.savedTokens.toLocaleString()} tokens excluded across ${session.retrievals.toLocaleString()} retrieval${session.retrievals === 1 ? '' : 's'} (${(session.reductionPercent * 100).toFixed(1)}%).`;
+  const returned = `Estimated context: ~${summary.returnedTokens.toLocaleString()} tokens of code`;
+  if (!summary.files) return `${returned}.`;
+  const fileCount = `${summary.files.toLocaleString()} file${summary.files === 1 ? '' : 's'}`;
+  return summary.fileTokens === undefined
+    ? `${returned} from ${fileCount}.`
+    : `${returned} from ${fileCount} (those files read whole: ~${summary.fileTokens.toLocaleString()} tokens).`;
 }

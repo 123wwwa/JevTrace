@@ -11,6 +11,8 @@ export interface ContextItem {
   site?: SourceLocation;
   depth: number;
   score?: number;
+  /** For `argument` items: the lead's parameter the value is passed into. */
+  parameter?: string;
 }
 export interface JudgeRoundTrace {
   round: number;
@@ -253,52 +255,82 @@ export async function retrieve(adapter: LanguageAdapter, judge: RelevanceJudge, 
 
 /**
  * Renders the context for the agent within maxChars. Code blocks are never cut in the middle: blocks are
- * added in ranking order while they fit, and the ones that do not are listed by location instead (a
- * mid-block cut used to drop the tail of the ranking silently, including needed callers and types).
+ * added in ranking order while they fit, a body that does not fit is given as its signature, and what still
+ * does not fit is listed by location (a mid-block cut used to drop the tail of the ranking silently, including
+ * needed callers and types). One-line declarations (constants, small types) share a single block instead of
+ * paying a heading and a fence each.
  */
 export function formatContext(result: RetrievalResult, maxChars = 30000): string {
   const listed = 8;
-  const relation = (item: ContextItem) => item.kind && item.path.length > 1 ? `; ${item.kind} of ${item.path[0]}` : item.kind ? `; ${item.kind}` : '';
-  const block = (item: ContextItem) => `### ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine} [${item.level}${relation(item)}${item.score === undefined ? '' : `; relevance ${item.score.toFixed(2)}`}]
+  const relation = (item: ContextItem) => {
+    if (!item.kind) return '';
+    const of = item.path.length > 1 ? ` of ${item.path[item.path.length - 2]}` : '';
+    return item.kind === 'argument' && item.parameter ? `; argument ${item.parameter}${of}` : `; ${item.kind}${of}`;
+  };
+  // The line that connects an item to the lead: where an argument is passed, or where a caller shown only as
+  // a signature makes the call.
+  const siteLine = (item: ContextItem, level: ContextLevel) =>
+    item.site?.text && (item.kind === 'argument' || (level === 'signature' && (item.kind === 'caller' || item.kind === 'test')))
+      ? `// ${item.kind === 'argument' ? 'passed at' : 'calls it at'} ${item.site.file}:${item.site.line}: ${item.site.text}\n` : '';
+  const block = (item: ContextItem, level: ContextLevel) => `### ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine} [${level}${relation(item)}${item.score === undefined ? '' : `; relevance ${item.score.toFixed(2)}`}]
 \`\`\`ts
-${item.level === 'body' ? item.node.source : item.node.signature}
+${siteLine(item, level)}${level === 'body' ? item.node.source : item.node.signature}
 \`\`\``;
+  const oneLine = (item: ContextItem) => item.kind !== undefined && item.level === 'body' && !['caller', 'test', 'argument'].includes(item.kind)
+    && !item.node.source.includes('\n') && item.node.source.length <= 200;
+  const compactLine = (item: ContextItem) => `${item.node.source} // ${item.node.file}:${item.node.startLine}`;
+  const compactOpen = '### One-line declarations used above\n```ts';
+  const compactClose = '```';
   const location = (item: ContextItem) => `- ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine}`;
+  const notShownHeading = ['', '## Not shown (output limit; read these directly if needed)'];
   const footer = (notShown: ContextItem[]) => {
     const lines: string[] = [];
-    if (notShown.length) lines.push('', '## Not shown (output limit; read these directly if needed)', ...notShown.map(location));
+    if (notShown.length) lines.push(...notShownHeading, ...notShown.map(location));
     if (result.omitted.length) lines.push('', '## Omitted (over the token budget)', ...result.omitted.slice(0, listed).map(location),
       ...(result.omitted.length > listed ? [`- … and ${result.omitted.length - listed} more`] : []));
     if (result.unresolved.length) lines.push('', '## Not followed (dynamic or external references)', ...result.unresolved.slice(0, listed).map(item => `- ${item.site.file}:${item.site.line} ${item.expression}`),
       ...(result.unresolved.length > listed ? [`- … and ${result.unresolved.length - listed} more`] : []));
     return lines.join('\n');
   };
+  const header = (count: number, signatures: number) => [
+    `Status: ${result.status} | Context: ${count} of ${result.items.length} symbols shown${signatures ? ` (${signatures} as signatures)` : ''}, ~${result.usedTokens}/${result.tokenBudget} tokens selected`,
+    `Task: ${result.task}`,
+    `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
+    ...result.warnings.map(w => `Warning: ${w}`),
+    ...(result.notes?.length ? [`Notes: ${result.notes.join('; ')}`] : []),
+    // Agents otherwise tend to reread whole files to re-confirm code they were just given.
+    'The code below is the current source, linked by the TypeScript compiler. Work from it; read files only for what it does not show.',
+    '', '## Context',
+  ].join('\n');
 
-  const blocks = result.items.map(block);
-  const shown: number[] = [];
-  const header = (count: number) => {
-    const items = shown.map(index => result.items[index]);
-    const signatures = items.filter(item => item.level === 'signature').length;
-    return [
-      `Status: ${result.status} | Context: ${count} of ${result.items.length} symbols shown${signatures ? ` (${signatures} as signatures)` : ''}, ~${result.usedTokens}/${result.tokenBudget} tokens selected`,
-      `Task: ${result.task}`,
-      `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
-      ...result.warnings.map(w => `Warning: ${w}`),
-      ...(result.notes?.length ? [`Notes: ${result.notes.join('; ')}`] : []),
-      // Agents otherwise tend to reread whole files to re-confirm code they were just given.
-      'The code below is the current source, linked by the TypeScript compiler. Work from it; read files only for what it does not show.',
-      '', '## Context',
-    ].join('\n');
-  };
-  // Reserve room for the header and for listing every block that might not fit.
-  const reserve = header(result.items.length).length + footer(result.items).length + 2;
-  let used = reserve;
-  for (const [index, text] of blocks.entries()) {
-    if (used + text.length + 1 > maxChars) continue;
-    shown.push(index);
-    used += text.length + 1;
+  // Start as if nothing fits (every item listed by location), then each item shown gives its location line back.
+  let used = header(result.items.length, result.items.length).length + footer([]).length + notShownHeading.join('\n').length + 2
+    + result.items.reduce((sum, item) => sum + location(item).length + 1, 0);
+  const shown = new Map<number, ContextLevel>();
+  const compact: number[] = [];
+  for (const [index, item] of result.items.entries()) {
+    const refund = location(item).length + 1;
+    if (oneLine(item)) {
+      const cost = compactLine(item).length + 1 + (compact.length ? 0 : compactOpen.length + compactClose.length + 2);
+      if (used + cost - refund <= maxChars) { compact.push(index); used += cost - refund; }
+      continue;
+    }
+    const levels: ContextLevel[] = item.level === 'body' && item.node.signature !== item.node.source ? ['body', 'signature'] : [item.level];
+    for (const level of levels) {
+      const cost = block(item, level).length + 1;
+      if (used + cost - refund > maxChars) continue;
+      shown.set(index, level);
+      used += cost - refund;
+      break;
+    }
   }
-  const notShown = result.items.filter((_, index) => !shown.includes(index));
-  const text = [header(shown.length), ...shown.map(index => blocks[index]), footer(notShown)].join('\n');
+  const notShown = result.items.filter((_, index) => !shown.has(index) && !compact.includes(index));
+  const signatures = [...shown.values()].filter(level => level === 'signature').length;
+  const text = [
+    header(shown.size + compact.length, signatures),
+    ...[...shown].sort((a, b) => a[0] - b[0]).map(([index, level]) => block(result.items[index], level)),
+    ...(compact.length ? [compactOpen, ...compact.map(index => compactLine(result.items[index])), compactClose] : []),
+    footer(notShown),
+  ].filter(Boolean).join('\n');
   return text.length > maxChars ? text.slice(0, maxChars - 35) + '\n[Output character limit reached]' : text;
 }

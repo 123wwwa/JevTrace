@@ -48,6 +48,8 @@ async function connect(t, root, env = {}) {
 }
 
 const text = result => result.content.map(part => part.text ?? '').join('\n');
+/** Result metadata: in `_meta`, out of the model's context. */
+const view = result => result._meta?.['jevtrace/result'];
 
 test('stdio server lists its tools and attaches no UI to them', async t => {
   const { client, transportErrors } = await connect(t, project(t, authProject));
@@ -81,7 +83,7 @@ test('stdio server answers all three tools', async t => {
   const { client, transportErrors } = await connect(t, project(t, authProject));
   const retrieved = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'Fix refresh token validation' } });
   assert.ok(!retrieved.isError, text(retrieved));
-  assert.ok(retrieved.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+  assert.ok(view(retrieved).items.some(item => item.node.name === 'refreshToken'));
   assert.match(text(retrieved), /Estimated context:/);
 
   const discovered = await client.callTool({ name: 'discover_entries', arguments: { task: 'refresh token' } });
@@ -90,7 +92,7 @@ test('stdio server answers all three tools', async t => {
 
   const explicit = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2 } });
   assert.ok(!explicit.isError, text(explicit));
-  assert.equal(explicit.structuredContent.entry.name, 'refreshToken');
+  assert.equal(view(explicit).entry.name, 'refreshToken');
 
   const bySymbol = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', symbol: 'refreshToken' } });
   assert.ok(!bySymbol.isError, text(bySymbol));
@@ -185,7 +187,7 @@ test('a malformed tsconfig is skipped instead of breaking server startup', async
   const { client } = await connect(t, project(t, { 'tsconfig.json': '{ not json', 'src/auth.ts': 'export function refreshToken(token: string) { return token; }\n' }));
   const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
   assert.ok(!result.isError, text(result));
-  assert.ok(result.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+  assert.ok(view(result).items.some(item => item.node.name === 'refreshToken'));
 });
 
 test('a missing provider key is reported as a tool error', async t => {
@@ -199,22 +201,23 @@ test('session savings accumulate across task-only retrievals and survive a no-co
   const { client } = await connect(t, project(t, authProject));
   const first = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token', tokenBudget: 500 } });
   const second = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'decode jwt', tokenBudget: 500 } });
-  const [a, b] = [first.structuredContent.contextSavings, second.structuredContent.contextSavings];
+  const [a, b] = [view(first).contextSavings, view(second).contextSavings];
   assert.equal(a.session.retrievals, 1);
   assert.equal(b.session.retrievals, 2);
   assert.equal(b.session.candidateTokens, a.candidateTokens + b.candidateTokens);
   assert.equal(b.session.savedTokens, a.savedTokens + b.savedTokens);
   assert.equal(b.session.returnedTokens, a.returnedTokens + b.returnedTokens);
   assert.equal(b.stage4Applied, false, 'the offline include-all judge ranks nothing');
-  assert.match(text(second), /Session so far: .* across 2 retrievals/);
+  assert.doesNotMatch(text(second), /Session so far/, 'session totals are not for the agent');
+  assert.match(text(second), /Estimated context: ~[\d,]+ tokens of code from 2 files \(those files read whole: ~[\d,]+ tokens\)\./);
 
   const explicit = await client.callTool({ name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2 } });
-  assert.equal(explicit.structuredContent.contextSavings, undefined, 'explicit-entry calls do not count toward session savings');
+  assert.equal(view(explicit).contextSavings, undefined, 'explicit-entry calls do not count toward session savings');
 
   const none = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'zzqx wobble frobnicate' } });
-  assert.equal(none.structuredContent.status, 'incomplete');
-  assert.equal(none.structuredContent.items, undefined);
-  assert.equal(none.structuredContent.session.retrievals, 2);
+  assert.equal(view(none).status, 'incomplete');
+  assert.equal(view(none).items, undefined);
+  assert.equal(view(none).session.retrievals, 2);
 });
 
 test('without --root the server follows CLAUDE_PROJECT_DIR, as Claude Code user-scope servers need', async t => {
@@ -231,7 +234,7 @@ test('without --root the server follows CLAUDE_PROJECT_DIR, as Claude Code user-
   await client.connect(transport);
   const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
   assert.ok(!result.isError, text(result));
-  assert.ok(result.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+  assert.ok(view(result).items.some(item => item.node.name === 'refreshToken'));
 });
 
 test('tool calls are logged locally and `jevtrace stats` summarizes them with Claude Code session use', async t => {
@@ -269,18 +272,17 @@ test('tool calls are logged locally and `jevtrace stats` summarizes them with Cl
   assert.match(output, /searched with Grep\/Glob\/Read only: 1/);
 });
 
-test('structured results stay small: source code is only in the maxChars-bounded text', async t => {
+test('the model gets only the maxChars-bounded text; dashboard data travels in _meta without source', async t => {
   const files = { ...authProject };
   for (let index = 0; index < 40; index++) files[`src/helper${index}.ts`] = `export function refreshHelper${index}(token: string) {\n${'  const padding = token + "' + 'x'.repeat(80) + '";\n'.repeat(1)}${Array.from({ length: 30 }, (_, line) => `  const step${line} = token.length + ${line};`).join('\n')}\n  return token;\n}\n`;
   const { client } = await connect(t, project(t, files));
   const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'refresh token helper', maxChars: 5000 } });
   assert.ok(!result.isError, text(result));
   assert.ok(text(result).length <= 5000);
-  // Claude Code shows the model structuredContent rather than the text, so the bounded context is there too.
-  assert.equal(result.structuredContent.context, text(result));
-  assert.ok(JSON.stringify(result.structuredContent).length < 5_000 + 20_000, `structuredContent was ${JSON.stringify(result.structuredContent).length} chars`);
-  const outsideContext = JSON.stringify({ ...result.structuredContent, context: undefined });
-  assert.ok(!outsideContext.includes('const step'), 'source code appears only inside the bounded context');
+  // Claude Code shows the model structuredContent in place of the text when present; the text alone reaches it.
+  assert.equal(result.structuredContent, undefined);
+  assert.ok(JSON.stringify(view(result)).length < 20_000, `the dashboard data was ${JSON.stringify(view(result)).length} chars`);
+  assert.ok(!JSON.stringify(view(result)).includes('const step'), 'source code appears only in the bounded text');
   const discovered = await client.callTool({ name: 'discover_entries', arguments: { task: 'refresh token helper' } });
   assert.ok(text(discovered).length < 5_000);
   assert.match(text(discovered), /call retrieve_dependency_context for the code/);
@@ -390,7 +392,7 @@ test('a rejected key is reported first, and a key saved by setup is used without
   assert.ok(!rejected.isError, text(rejected));
   assert.match(text(rejected), /^Jev could not be used for this result, .* Tell the user: The Jev provider rejected the API key\. Run `npx -y jevtrace setup`/);
   assert.match(stderr(), /jevtrace \(retrieve_dependency_context\): Jev could not be used/);
-  assert.ok(rejected.structuredContent.items.some(item => item.node.name === 'refreshToken'));
+  assert.ok(view(rejected).items.some(item => item.node.name === 'refreshToken'));
 
   // What `jevtrace setup` does while the agent keeps running.
   save('working-key');

@@ -136,7 +136,7 @@ Every MCP tool call is appended to `~/.jevtrace/usage.jsonl`: time, tool, projec
 node /absolute/JevTrace/dist/cli.js stats --days 7
 ```
 
-To see what the agent itself receives for a task (Claude Code shows the model the structured result, which carries the same bounded context as the text), run:
+To see what the agent itself receives for a task (the text content; the retrieval tools return no `structuredContent`, which Claude Code would otherwise show the model in place of the text), run:
 
 ```bash
 node --env-file=.env scripts/agent-view.mjs /absolute/project "Describe the change you want"
@@ -184,12 +184,12 @@ Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, revers
 
 ### Token savings
 
-Nothing is shown in the chat on its own. Every task-only result ends with a short `Session so far:` line for the agent, and the same totals are in the structured result as `contextSavings.session`. To see the savings when you want to:
+Nothing is shown in the chat on its own. Each task-only result starts with one line comparing the code returned with the files it comes from, `Estimated context: ~N tokens of code from F files (those files read whole: ~M tokens).` The other figures (returned symbols with scores, the ranking pool, session totals) are in the result's `_meta["jevtrace/result"]`, which hosts keep out of the model's context, so the agent does not read them twice. To see the totals when you want to:
 
 - **Ask the agent**, for example "How many tokens has JevTrace saved?". It calls the `usage_stats` tool, which returns the usage-log summary for the last 30 days (or `days`) plus the totals since this server started. The tool is described to agents as for that question only, so it is not called during coding tasks. To answer quickly it reads the newest 64 MB of session transcripts and says how many older ones it left out; `stats` in a terminal reads them all.
 - **Run `stats`** in a terminal (see [Usage log and `stats`](#usage-log-and-stats)).
 
-The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.
+The candidate-pool reduction (`final ranking pool -> returned context`) measures what JevTrace left out of its own candidates, not reading an agent was spared, so it is not shown to the agent. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.
 
 ## Benchmarks
 
