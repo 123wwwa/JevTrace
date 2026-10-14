@@ -17,6 +17,8 @@ import { InMemoryTransport, LATEST_PROTOCOL_VERSION } from '@modelcontextprotoco
 import { createServer } from '../dist/server.js';
 import { RetrievalLatencyWindow } from '../dist/context-metrics.js';
 
+const view = result => result._meta?.['jevtrace/result'];
+
 function semanticJudge({ fileScore = file => file.includes('auth') ? 0.9 : 0.8, symbolScore = name => name === 'refreshToken' ? 0.9 : 0.7 } = {}) {
   return {
     name: 'semantic-fixture',
@@ -410,21 +412,24 @@ test('MCP exposes discovery and accepts task-only retrieval through its wire sch
   assert.equal(discovered.structuredContent.selected.name, discovered.structuredContent.lexicalCandidates[0].name);
   const result = await request('tools/call', { name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
   assert.equal(result.isError, undefined);
-  assert.ok(result.structuredContent.items.some(item => item.node.name === 'decodeJWT'));
-  assert.equal(result.structuredContent.contextSavings.estimated, true);
-  assert.equal(result.structuredContent.contextSavings.available, true);
-  assert.equal(result.structuredContent.contextSavings.candidateTokens, result.structuredContent.rankingPool.stats.tokens);
-  assert.equal(result.structuredContent.contextSavings.returnedTokens, result.structuredContent.usedTokens);
-  assert.equal(result.structuredContent.contextSavings.latencyStats.sampleCount, 1);
-  assert.equal(result.structuredContent.contextSavings.latencyStats.windowSize, 50);
-  assert.equal(result.structuredContent.contextSavings.latencyStats.p95Ms, result.structuredContent.contextSavings.totalMs);
+  assert.ok(view(result).items.some(item => item.node.name === 'decodeJWT'));
+  assert.equal(view(result).contextSavings.estimated, true);
+  assert.equal(view(result).contextSavings.available, true);
+  assert.equal(view(result).contextSavings.candidateTokens, view(result).rankingPool.stats.tokens);
+  assert.equal(view(result).contextSavings.returnedTokens, view(result).usedTokens);
+  assert.equal(result.structuredContent, undefined, 'the model reads the text, not a JSON copy of it');
+  assert.equal(view(result).contextSavings.files, 2);
+  assert.ok(view(result).contextSavings.fileTokens >= view(result).contextSavings.returnedTokens);
+  assert.equal(view(result).contextSavings.latencyStats.sampleCount, 1);
+  assert.equal(view(result).contextSavings.latencyStats.windowSize, 50);
+  assert.equal(view(result).contextSavings.latencyStats.p95Ms, view(result).contextSavings.totalMs);
   assert.match(result.content[0].text, /Estimated context:/);
   const second = await request('tools/call', { name: 'retrieve_dependency_context', arguments: { task: 'refresh token' } });
-  assert.equal(second.structuredContent.contextSavings.latencyStats.sampleCount, 2);
+  assert.equal(view(second).contextSavings.latencyStats.sampleCount, 2);
   const explicit = await request('tools/call', { name: 'retrieve_from_entry', arguments: { task: 'refresh token', file: 'src/auth.ts', line: 2, maxDepth: 1, reverse: false } });
   assert.equal(explicit.isError, undefined);
-  assert.equal(explicit.structuredContent.entry.name, 'refreshToken');
-  assert.equal(explicit.structuredContent.contextSavings, undefined);
+  assert.equal(view(explicit).entry.name, 'refreshToken');
+  assert.equal(view(explicit).contextSavings, undefined);
 });
 
 test('real-task metrics distinguish entry rank and missing required bodies', () => {

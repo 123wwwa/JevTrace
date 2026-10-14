@@ -252,7 +252,7 @@ test('session savings total every retrieval and never count a larger result as n
   for (let index = 1; index <= 9; index++) session.record(100, 60);
   session.record(50, 80);
   const stats = session.snapshot();
-  assert.deepEqual(stats, { retrievals: 10, candidateTokens: 950, returnedTokens: 620, savedTokens: 360, reductionPercent: 360 / 950 });
+  assert.deepEqual(stats, { retrievals: 10, candidateTokens: 950, returnedTokens: 620, savedTokens: 360, reductionPercent: 360 / 950, fileTokens: 0 });
 });
 
 test('a decision provider with a different wire format plugs in through DecisionBackend alone', async t => {
@@ -327,7 +327,7 @@ test('callers reached through CommonJS module.exports and require are found, inc
   assert.deepEqual(callers('src/backoff.cjs', 'backoffDelay'), ['go']);
 });
 
-test('formatted context never cuts a code block; blocks over maxChars are listed by location', async t => {
+test('formatted context never cuts a code block: a body over maxChars becomes its signature, then a location', async t => {
   const { formatContext } = await import('../dist/retrieve.js');
   const body = name => `export function ${name}() {\n${'  const value = 1;\n'.repeat(40)}}`;
   const item = (name, startLine) => ({ node: { id: name, name, file: 'src/a.ts', startLine, endLine: startLine + 41, source: body(name), signature: `export function ${name}()` }, level: 'body', path: [name], depth: 1 });
@@ -338,8 +338,37 @@ test('formatted context never cuts a code block; blocks over maxChars are listed
   assert.ok(text.length <= 2500);
   assert.ok(!text.includes('[Output character limit reached]'));
   assert.equal((text.match(/```ts/g) ?? []).length * 2, (text.match(/```/g) ?? []).length, 'every block is closed');
-  assert.match(text, /## Not shown \(output limit/);
-  assert.match(text, /- type — src\/a\.ts:151-192/);
+  assert.match(text, /### lead — src\/a\.ts:1-42 \[body\]/);
+  assert.match(text, /### type — src\/a\.ts:151-192 \[signature\]\n```ts\nexport function type\(\)\n```/, 'a body that does not fit is still given as its signature');
+  assert.match(text, /4 of 4 symbols shown \(2 as signatures\)/);
+  assert.doesNotMatch(text, /## Not shown/);
+  const tight = formatContext(result, 600);
+  assert.ok(tight.length <= 600);
+  assert.match(tight, /## Not shown \(output limit/);
+  assert.match(tight, /- type — src\/a\.ts:151-192/);
+});
+
+test('one-line declarations share one block, and callers shown as signatures keep their call line', async () => {
+  const { formatContext } = await import('../dist/retrieve.js');
+  const node = (name, source, startLine, signature = source) => ({ id: name, name, file: 'src/a.ts', startLine, endLine: startLine + source.split('\n').length - 1, source, signature });
+  const lead = node('lead', 'export function lead(dist: Field) {\n  return dist[0] * BOOST;\n}', 10);
+  const items = [
+    { node: lead, level: 'body', path: ['lead'], depth: 0 },
+    { node: node('BOOST', 'export const BOOST = 3;', 1), level: 'body', kind: 'value', path: ['lead', 'BOOST'], depth: 1 },
+    { node: node('Field', 'export type Field = Int32Array;', 2), level: 'body', kind: 'type', path: ['lead', 'Field'], depth: 1 },
+    { node: node('act', 'export function act() {\n  const dist = field();\n  return lead(dist);\n}', 20, 'export function act()'), level: 'signature', kind: 'caller', path: ['lead', 'act'], depth: 1,
+      site: { file: 'src/a.ts', line: 22, text: 'return lead(dist);' } },
+    { node: node('field', 'export function field() {\n  return new Int32Array(4);\n}', 30), level: 'body', kind: 'argument', parameter: 'dist', path: ['lead', 'field'], depth: 1,
+      site: { file: 'src/a.ts', line: 22, text: 'return lead(dist);' } },
+  ];
+  const result = { task: 't', judge: 'j', status: 'complete', entry: lead, items, omitted: [], unresolved: [], considered: 5, usedTokens: 100, tokenBudget: 8000,
+    visitPolicy: 'score', choiceDecisions: 0, wrapperLookahead: false, bodyThreshold: 0, omitThreshold: 0, reverseFanIn: 12, reversePruned: 0, judgeRounds: 0, judgeTrace: [], warnings: [] };
+  const text = formatContext(result, 5000);
+  assert.match(text, /### One-line declarations used above\n```ts\nexport const BOOST = 3; \/\/ src\/a\.ts:1\nexport type Field = Int32Array; \/\/ src\/a\.ts:2\n```/);
+  assert.doesNotMatch(text, /### BOOST/);
+  assert.match(text, /### act — src\/a\.ts:20-23 \[signature; caller of lead\]\n```ts\n\/\/ calls it at src\/a\.ts:22: return lead\(dist\);\nexport function act\(\)/);
+  assert.match(text, /### field — src\/a\.ts:30-32 \[body; argument dist of lead\]\n```ts\n\/\/ passed at src\/a\.ts:22: return lead\(dist\);\n/);
+  assert.match(text, /5 of 5 symbols shown \(1 as signatures\)/);
 });
 
 test('callers of a function held in a class property are found although the call hierarchy skips that form', t => {
@@ -354,7 +383,7 @@ test('siblings: helpers the lead\'s same-file caller uses alongside it are inclu
     'src/source.ts': [
       'function sourceText(text: string) { return { lines: text.split("\\n") }; }',
       'export function textUnits(parsed: { lines: string[] }, max: number) { return parsed.lines.slice(0, max); }',
-      'export function splitSource(text: string, max = 4) { return textUnits(sourceText(text), max); }',
+      'export function splitSource(text: string, max = 4) { const units = textUnits({ lines: [text] }, max); return sourceText(units.join("\\n")); }',
       'export function unrelated() { return 1; }',
     ].join('\n'),
   });
@@ -607,4 +636,153 @@ test('errors are explained with what to do next, and a home directory is refused
   assert.match(unsuitableRoot(os.homedir()), /started in your home directory .* not in a project/);
   assert.match(unsuitableRoot(path.parse(os.homedir()).root), /started in the filesystem root/);
   assert.equal(unsuitableRoot(path.join(os.tmpdir(), 'some-project')), undefined);
+});
+
+const lootFiles = {
+  'src/grid.ts': 'export type Field = Int32Array;\nexport function distanceField(width: number): Field { return new Int32Array(width).fill(1); }\nexport function manhattan(a: number, b: number) { return Math.abs(a - b); }\n',
+  'src/value.ts': [
+    'export function equipScore(tier: number) { let score = 0; for (let i = 0; i < 12; i++) score += Math.sin(i * tier); return score; }',
+    'const keep = new Map<number, number>();',
+    'export function itemValue(tier: number) { const kept = keep.get(tier); if (kept !== undefined) return kept; const value = equipScore(tier); keep.set(tier, value); return value; }',
+  ].join('\n'),
+  'src/loot.ts': [
+    'import type { Field } from "./grid";',
+    'import { itemValue } from "./value";',
+    'export function lootCandidates(tiers: number[], dist: Field, metric: (a: number, b: number) => number, onPick?: (tier: number) => void) {',
+    '  const out: number[] = [];',
+    '  for (const tier of tiers) { out.push(itemValue(tier) / (dist[0] + metric(tier, 0))); onPick?.(tier); }',
+    '  return out.sort((a, b) => b - a);',
+    '}',
+  ].join('\n'),
+  'src/bot.ts': [
+    'import { distanceField, manhattan } from "./grid";',
+    'import { lootCandidates } from "./loot";',
+    'export function resolveAction(tiers: number[], width: number) {',
+    '  const dist = distanceField(width);',
+    '  return lootCandidates(tiers, dist, manhattan, tier => console.log(tier));',
+    '}',
+    'export function replan(tiers: number[], dist: Int32Array) { return lootCandidates(tiers, dist, manhattan); }',
+  ].join('\n'),
+  'src/loot.test.ts': 'import { lootCandidates } from "./loot";\nfunction fakeField() { return new Int32Array(2); }\nexport const check = () => lootCandidates([1], fakeField(), () => 0);\n',
+};
+
+test('argument sources: what callers pass into the lead\'s parameters, traced through local variables', t => {
+  const adapter = new TypeScriptAdapter(project(t, lootFiles));
+  const lead = adapter.findEntry({ file: 'src/loot.ts', symbol: 'lootCandidates' });
+  const edges = adapter.argumentSources(lead).edges;
+  const byName = new Map(edges.map(edge => [edge.target.name, edge]));
+  assert.equal(byName.get('distanceField')?.parameter, 'dist', 'a variable holding a call result leads to the function that computed it');
+  assert.equal(byName.get('distanceField')?.site.file, 'src/bot.ts');
+  assert.equal(byName.get('manhattan')?.parameter, 'metric', 'a function passed by name');
+  assert.ok(edges.some(edge => edge.parameter === 'onPick' && edge.target.file === 'src/bot.ts' && /callback/.test(edge.target.name)), 'an inline callback');
+  assert.ok(!byName.has('fakeField'), 'test call sites pass fixtures and are skipped');
+  assert.ok(edges.every(edge => edge.kind === 'argument'));
+  assert.equal(edges.length, 3, 'a value that arrives through the caller\'s own parameter (replan) is not followed further up');
+});
+
+test('the task pipeline returns argument sources and the callees of the lead\'s callees', async t => {
+  const root = project(t, lootFiles);
+  const leadOnly = judge(node => node.id.startsWith('file::') || node.name === 'lootCandidates' ? 0.95 : 0.1);
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), leadOnly, judge(), 'loot candidates are slow',
+    { contextRanking: 'structural', maxLeads: 1 });
+  const byName = new Map(result.items.map(item => [item.node.name, item]));
+  assert.equal(result.entry.name, 'lootCandidates');
+  assert.equal(byName.get('distanceField')?.kind, 'argument');
+  assert.equal(byName.get('distanceField')?.parameter, 'dist');
+  assert.equal(byName.get('equipScore')?.kind, 'call');
+  assert.deepEqual(byName.get('equipScore')?.path, ['lootCandidates', 'itemValue', 'equipScore'], 'reached through itemValue');
+  const { formatContext } = await import('../dist/retrieve.js');
+  const text = formatContext(result);
+  assert.match(text, /### distanceField — src\/grid\.ts:2-2 \[body; argument dist of lootCandidates[^\]]*\]\n```ts\n\/\/ passed at src\/bot\.ts:5: /);
+  assert.match(text, /export function equipScore.*\/\/ src\/value\.ts:1/, 'a one-line function shares the one-line block');
+  assert.doesNotMatch(text, /## Not followed/, 'built-in members (push, sort) and calls through traced parameters (metric, onPick) are not reported as unresolved');
+});
+
+test('a direct callee is not relabelled as a callee of a callee when another lead reaches it that way', async t => {
+  const root = project(t, {
+    'src/score.ts': 'export function equipScore(tier: number) { return tier * 2; }\nexport function itemValue(tier: number) { return equipScore(tier) + 1; }\n',
+    'src/a.ts': 'import { equipScore } from "./score";\nexport function rankArmor(tier: number) { return equipScore(tier); }\n',
+    'src/b.ts': 'import { itemValue } from "./score";\nexport function rankLoot(tier: number) { return itemValue(tier); }\n',
+  });
+  const leads = judge(node => node.id.startsWith('file::') || ['rankArmor', 'rankLoot'].includes(node.name) ? 0.95 : 0.1);
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), leads, judge(), 'rank armor and loot by equip score',
+    { contextRanking: 'structural', maxLeads: 2 });
+  assert.deepEqual(result.semanticLeads.map(node => node.name).sort(), ['rankArmor', 'rankLoot']);
+  const equipScore = result.items.find(item => item.node.name === 'equipScore');
+  assert.equal(equipScore?.path.length, 2, `direct callee of rankArmor, got path ${equipScore?.path.join(' > ')}`);
+});
+
+const viewerFiles = {
+  'src/client/audio.ts': 'export class AudioManager {\n  muted = false;\n  playSound(name: string) { return this.muted ? undefined : name; }\n}\nexport function playUiSound(audio: AudioManager) { return audio.playSound("click"); }\n',
+  'env/viewer/index.html': '<!doctype html>\n<label><input type="checkbox" id="sound-toggle"> Sound</label>\n<label><input type="checkbox" id="show-names"> Show player names</label>\n<script src="sound.js"></script>\n',
+  'env/viewer/sound.js': 'const toggle = document.getElementById("sound-toggle");\nlet soundEnabled = localStorage.getItem("viewer-sound") !== "off";\ntoggle.addEventListener("change", () => { soundEnabled = toggle.checked; });\n',
+};
+
+test('keywords mostly in HTML and plain scripts are reported first, with their lines, and the code is cut short', async t => {
+  const root = project(t, viewerFiles);
+  const { formatContext } = await import('../dist/retrieve.js');
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), judge(), judge(), 'viewer sound toggle and show names',
+    { contextRanking: 'structural', tokenBudget: 6000 });
+  assert.equal(result.keywords.outsideFirst, true);
+  assert.deepEqual(result.keywords.matches.slice(0, 2).map(match => [match.file, match.kind]), [['env/viewer/index.html', 'text'], ['env/viewer/sound.js', 'text']]);
+  assert.equal(result.tokenBudget, 2000, 'the analysed code is a side note here');
+  const text = formatContext(result);
+  assert.match(text, /^Mostly outside the analysed code: .*Look there first: env\/viewer\/index\.html \(viewer, sound, toggle, names\); env\/viewer\/sound\.js/);
+  assert.match(text, /## Keyword matches outside the analysed declarations[^\n]*\n- env\/viewer\/index\.html \[viewer, sound, toggle, names; HTML\]\n  2: <label><input type="checkbox" id="sound-toggle"> Sound<\/label>/);
+  assert.ok(text.indexOf('## Keyword matches') < text.indexOf('## Context'), 'the likely answer comes before the code');
+
+  // A task about the analysed code gets no notice; its keyword section, if any, follows the code.
+  const code = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), judge(), judge(), 'audio manager play sound when muted', { contextRanking: 'structural' });
+  assert.equal(code.keywords.outsideFirst, false);
+  assert.doesNotMatch(formatContext(code), /Mostly outside/);
+});
+
+test('keywords nothing in the repository contains are named; a task none of whose keywords occur says it probably does not exist', async t => {
+  const root = project(t, viewerFiles);
+  const index = new RepositoryIndex(root);
+  const { keywords } = await discoverEntries(index, judge(), 'is there latency compensation for input delay', {}, new TypeScriptAdapter(root));
+  assert.deepEqual(keywords.terms, ['latency', 'compensation', 'input', 'delay']);
+  assert.deepEqual(keywords.missing, ['latency', 'compensation', 'delay'], 'input occurs in the HTML');
+  const { formatKeywords } = await import('../dist/retrieve.js');
+  assert.match(formatKeywords(keywords).notice.join('\n'), /Keywords with no match anywhere in this repository: latency, compensation, delay\./);
+  const none = await discoverEntries(index, judge(), 'retry backoff jitter', {}, new TypeScriptAdapter(root));
+  assert.match(formatKeywords(none.keywords).notice.join('\n'), /No keyword match: none of the task's keywords \(retry, backoff, jitter\) appear .* it probably does not; a Grep can confirm\./);
+  // Filler words and non-ASCII words are not keywords: a Korean task reports nothing rather than "no match".
+  assert.deepEqual((await discoverEntries(index, judge(), '사운드 설정은 어디서 처리돼?', {}, new TypeScriptAdapter(root))).keywords.terms, []);
+});
+
+test('candidates the context ranking scores below minRelevance stay out although the budget has room', async t => {
+  const root = project(t, {
+    'src/throw.ts': 'import { Player } from "./player";\nexport function throwTick(player: Player, range: number) { if (range > 30) player.kill(); return player.aim(range); }\n',
+    'src/player.ts': 'export class Player {\n  hp = 1;\n  aim(range: number) { return range * 2; }\n  kill() { this.hp = 0; }\n  revive() { this.hp = 1; }\n}\n',
+    'src/game.ts': 'import { throwTick } from "./throw";\nimport { Player } from "./player";\nexport function tick(player: Player) { return throwTick(player, 10); }\n',
+  });
+  const leadOnly = judge(node => node.id.startsWith('file::') || node.id.startsWith('dir::') || node.name === 'throwTick' ? 0.95 : 0.1);
+  const ranking = { name: 'ranking', async rankContext(_task, candidates) {
+    return { decisions: new Map(candidates.map(candidate => [candidate.node.id, { include: true, score: candidate.node.name === 'Player.kill' ? 0.05 : 0.8 }])), stats: { batches: [] } };
+  } };
+  const result = await retrieveTaskContext(new RepositoryIndex(root), new TypeScriptAdapter(root), leadOnly, ranking, 'grenade throw tick',
+    { tokenBudget: 60, perLeadTokenBudget: 2000, neighborhoodTokenBudget: 2000, maxLeads: 1 });
+  assert.equal(result.contextRankingApplied, true);
+  const names = result.items.map(item => item.node.name);
+  assert.ok(names.includes('throwTick'));
+  assert.ok(!names.includes('Player.kill'), names.join(', '));
+  assert.ok(!result.omitted.some(item => item.node.name === 'Player.kill'), 'left out, not listed as cut by the budget');
+  assert.ok(result.notes.some(note => /1 candidates ranked below relevance 0\.3 were left out/.test(note)), result.notes.join('; '));
+});
+
+test('readers of the same enum member or configuration key are followed, hubs and tests are not', t => {
+  const root = project(t, {
+    'src/modes.ts': 'export enum Mode { Move, Throw }\nexport const GRENADE = Object.freeze({ range: 30, cooldown: 40 });\nexport const DEBUG = false;\n',
+    'src/features.ts': 'import { Mode } from "./modes";\nexport function actionMask(grenades: number) { const mask = [true, false]; mask[Mode.Throw] = grenades > 0; return mask; }\n',
+    'src/planner.ts': 'import { GRENADE } from "./modes";\nexport function canReach(distance: number) { return distance <= GRENADE.range; }\n',
+    'src/bot.ts': 'import { GRENADE, Mode, DEBUG } from "./modes";\nexport function throwTick(mode: Mode, distance: number) {\n  if (mode !== Mode.Throw || DEBUG) return 0;\n  return Math.min(distance, GRENADE.range);\n}\n',
+    'src/bot.test.ts': 'import { Mode } from "./modes";\nexport const probe = () => Mode.Throw;\n',
+    ...Object.fromEntries(Array.from({ length: 45 }, (_, index) => [`src/log${index}.ts`, `import { DEBUG } from "./modes";\nexport function log${index}() { return DEBUG; }\n`])),
+  });
+  const adapter = new TypeScriptAdapter(root);
+  const lead = adapter.findEntry({ file: 'src/bot.ts', symbol: 'throwTick' });
+  const shared = adapter.sharedReaders(lead).edges.map(edge => `${edge.target.name} <${edge.symbol}> ${edge.site.file}:${edge.site.line}`).sort();
+  assert.deepEqual(shared, ['actionMask <Mode.Throw> src/features.ts:2', 'canReach <GRENADE.range> src/planner.ts:2'], 'DEBUG has 46 readers (a hub) and the test is skipped');
+  assert.ok(adapter.dependencies(lead, { values: true }).edges.some(edge => edge.kind === 'value' && edge.target.name === 'Mode'), 'the enum the lead branches on');
 });

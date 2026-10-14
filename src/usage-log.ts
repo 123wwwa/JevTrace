@@ -22,6 +22,8 @@ export interface UsageEntry {
   candidateTokens?: number;
   returnedTokens?: number;
   savedTokens?: number;
+  /** The returned code's files read whole. */
+  fileTokens?: number;
   jevRequests?: number;
   jevInputTokens?: number;
   jevCost?: number;
