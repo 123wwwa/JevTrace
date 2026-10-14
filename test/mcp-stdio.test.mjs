@@ -74,7 +74,9 @@ test('usage_stats reports the usage log and this session only when asked', async
   const stats = await client.callTool({ name: 'usage_stats', arguments: { days: 7 } });
   assert.match(text(stats), /JevTrace usage, last 7 days/);
   assert.match(text(stats), /Tool calls: 1 \(retrieve_dependency_context 1\)/);
-  assert.match(text(stats), /This server session: [\d,]+ tokens excluded from [\d,]+ candidates across 1 retrieval /);
+  assert.match(text(stats), /This server session: [\d,]+ tokens of code sent across 1 retrieval, from files totalling [\d,]+ tokens read whole\. \(JevTrace considered [\d,]+ tokens of candidates; what it left out is not reading saved/);
+  assert.match(text(stats), /tokens: [\d,]+ sent to the agent \([\d,]+ of them from files totalling [\d,]+ read whole\); [\d,]+ tokens of candidates considered/);
+  assert.doesNotMatch(text(stats), /excluded/);
   assert.equal(stats.structuredContent.session.retrievals, 1);
   assert.deepEqual(transportErrors, []);
 });
@@ -439,3 +441,10 @@ test('usage_stats and `stats` survive a damaged log and unreadable transcripts, 
   assert.doesNotMatch(formatStats(1, env), /not scanned/);
 });
 
+
+test('a task whose keywords occur nowhere gets that answer instead of an empty result', async t => {
+  const { client } = await connect(t, project(t, authProject));
+  const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'zzqx wobble frobnicate' } });
+  assert.ok(!result.isError, text(result));
+  assert.match(text(result), /No keyword match: none of the task's keywords \(zzqx, wobble, frobnicate\) appear/);
+});

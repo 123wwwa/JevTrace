@@ -17,6 +17,11 @@ export interface TaskPipelineOptions extends RetrievalOptions, DiscoveryOptions 
   scopeCheck?: boolean;
   /** Size limit of the repository map returned for a project-wide task (default 20,000 characters). */
   mapChars?: number;
+  /**
+   * Candidates the context ranking scores below this are left out even when the budget has room (default 0.3,
+   * the explicit-entry path's omit threshold): an unrelated method costs the agent more than a shorter answer.
+   */
+  minRelevance?: number;
 }
 
 export interface NeighborhoodItem {
@@ -32,6 +37,8 @@ export interface NeighborhoodItem {
   via?: string;
   /** For `argument` items: the lead's parameter the value is passed into. */
   parameter?: string;
+  /** For `shared` items: the enum member, constant or configuration key read by both. */
+  symbol?: string;
   structuralScore: number;
   semanticScore?: number;
   finalScore?: number;
@@ -74,10 +81,14 @@ const maxSiblingsPerLead = 4;
 /** Callees of the lead's callees kept per lead, and their prior: below siblings, above bare type references. */
 const maxNestedCalleesPerLead = 4;
 const nestedCalleePrior = 0.58;
+/** Readers of the lead's enum members, constants and configuration keys kept per lead. */
+const maxSharedPerLead = 4;
 /** Function calls only: a constructed class brings its whole body (or an outline) rather than the code that runs. */
 const callKinds = new Set<EdgeKind>(['call', 'method', 'import']);
 /** Above this many estimated tokens a non-lead class is returned as its member outline. */
 const largeClassTokens = 800;
+/** Final budget when the task's keywords are mostly in files JevTrace does not analyse as code. */
+const outsideFirstBudget = 2000;
 /** Across all leads; leads are expanded best-first, so the strongest leads' tests are kept. */
 const maxTestCallersTotal = 4;
 /** Users of type-level leads kept across all of them. */
@@ -97,6 +108,7 @@ const edgePrior: Record<EdgeKind, number> = {
   type: 0.55,
   lexical: 0.5,
   argument: 0.9,
+  shared: 0.74,
 };
 const stopWords = new Set(['a', 'an', 'the', 'is', 'are', 'to', 'of', 'for', 'in', 'on', 'and', 'or', 'how', 'change', 'fix', 'add', 'implement', 'with', 'when', 'should', 'from']);
 const taskTokens = (text: string): Set<string> => new Set(
@@ -118,11 +130,12 @@ export async function retrieveTaskContext(
   options: TaskPipelineOptions = {},
 ): Promise<TaskPipelineResult | BroadTaskResult | { task: string; status: 'incomplete' | 'not-covered'; discovery: DiscoveryResult; warnings: string[] }> {
   options.signal?.throwIfAborted();
-  const tokenBudget = options.tokenBudget ?? 8000;
+  const requestedBudget = options.tokenBudget ?? 8000;
   const maxLeads = options.maxLeads ?? 4;
   const perLeadNodeLimit = options.perLeadNodeLimit ?? 24;
-  const perLeadTokenBudget = options.perLeadTokenBudget ?? tokenBudget;
-  const neighborhoodTokenBudget = options.neighborhoodTokenBudget ?? tokenBudget * 2;
+  const perLeadTokenBudget = options.perLeadTokenBudget ?? requestedBudget;
+  const neighborhoodTokenBudget = options.neighborhoodTokenBudget ?? requestedBudget * 2;
+  const minRelevance = options.minRelevance ?? 0.3;
   const lexicalMergeLimit = options.lexicalMergeLimit ?? (options.maxCandidates ?? 64);
   const includeLexicalParallel = options.includeLexicalParallel === true;
   const includeCompilerExpansion = options.includeCompilerExpansion !== false;
@@ -131,7 +144,8 @@ export async function retrieveTaskContext(
 
   if (!Number.isInteger(perLeadNodeLimit) || perLeadNodeLimit < 1 || perLeadNodeLimit > 100) throw new UserFacingError('perLeadNodeLimit must be between 1 and 100');
   if (!Number.isInteger(perLeadTokenBudget) || perLeadTokenBudget < 100) throw new UserFacingError('perLeadTokenBudget must be at least 100');
-  if (!Number.isInteger(neighborhoodTokenBudget) || neighborhoodTokenBudget < tokenBudget) throw new UserFacingError('neighborhoodTokenBudget must be >= tokenBudget');
+  if (!Number.isInteger(neighborhoodTokenBudget) || neighborhoodTokenBudget < requestedBudget) throw new UserFacingError('neighborhoodTokenBudget must be >= tokenBudget');
+  if (!(minRelevance >= 0 && minRelevance <= 1)) throw new UserFacingError('minRelevance must be between 0 and 1');
   if (!Number.isInteger(lexicalMergeLimit) || lexicalMergeLimit < 0 || lexicalMergeLimit > 128) throw new UserFacingError('lexicalMergeLimit must be between 0 and 128');
 
   // The scope question runs alongside discovery, so a specific task pays no extra latency; a project-wide
@@ -191,6 +205,9 @@ export async function retrieveTaskContext(
     };
   }
 
+  // When the task's keywords are mostly in HTML or scripts JevTrace does not analyse, the analysed code is at
+  // best a side note: return less of it, and the result says where to look first.
+  const tokenBudget = discovery.keywords?.outsideFirst ? Math.min(requestedBudget, outsideFirstBudget) : requestedBudget;
   const terms = taskTokens(task);
   const unresolved: Unresolved[] = [];
   // warnings: something degraded the result (a failed provider stage, an unresolvable lead). notes: normal
@@ -214,6 +231,7 @@ export async function retrieveTaskContext(
     // `via` belongs to the closest relation: a direct neighbour also reached through another callee keeps none.
     if (item.depth < existing.depth) existing.via = item.via;
     existing.parameter ??= item.parameter;
+    existing.symbol ??= item.symbol;
     existing.structuralScore = Math.max(existing.structuralScore, item.structuralScore);
     existing.semanticScore = Math.max(existing.semanticScore ?? 0, item.semanticScore ?? 0) || undefined;
     existing.depth = Math.min(existing.depth, item.depth) as 0 | 1 | 2;
@@ -298,6 +316,14 @@ export async function retrieveTaskContext(
       }
     }
     const argumentEdges = argumentScan.filter(edge => !insideLead(edge.target));
+    // Readers of the same enum member, constant or configuration key: data flow with no call between them
+    // (the action mask that allows Mode.Throw). The most task-related first.
+    const sharedEdges = (adapter.sharedReaders?.(node).edges ?? [])
+      .filter(edge => !insideLead(edge.target))
+      .map((edge, order) => ({ edge, order, taskScore: lexicalEdgeScore(edge.target.name, edge.target.file, edge.site, terms) }))
+      .sort((a, b) => b.taskScore - a.taskScore || a.order - b.order)
+      .slice(0, maxSharedPerLead)
+      .map(item => item.edge);
     // Callees of callees: the lead often delegates the work (itemValue → equipScore), and a question about cost
     // or behaviour needs the code that does it. One bounded hop, the most task-related first.
     const direct = new Set([node.id, ...forward.edges.map(edge => edge.target.id)]);
@@ -323,13 +349,14 @@ export async function retrieveTaskContext(
         site: edge.site,
         ...(via ? { via } : {}),
         ...(edge.parameter ? { parameter: edge.parameter } : {}),
+        ...(edge.symbol ? { symbol: edge.symbol } : {}),
         structuralScore: via ? nestedCalleePrior : edgePrior[edge.kind],
         estimatedTokens: estimate(edge.target),
       } satisfies NeighborhoodItem,
       taskScore: lexicalEdgeScore(edge.target.name, edge.target.file, edge.site, terms),
     });
     const candidates = [
-      ...[...forward.edges.filter(edge => !insideLead(edge.target)), ...reverseEdges, ...siblingEdges, ...argumentEdges].map(edge => toCandidate(edge)),
+      ...[...forward.edges.filter(edge => !insideLead(edge.target)), ...reverseEdges, ...siblingEdges, ...argumentEdges, ...sharedEdges].map(edge => toCandidate(edge)),
       ...nestedEdges.map(({ edge, via }) => toCandidate(edge, via)),
     ];
     for (const { item } of candidates) merge(rawCompiler, item);
@@ -485,6 +512,13 @@ export async function retrieveTaskContext(
     || b.structuralScore - a.structuralScore
     || a.depth - b.depth
     || a.node.id.localeCompare(b.node.id));
+  // A budget is a ceiling, not a target: what the ranking judged unrelated stays out even when there is room.
+  const isLead = (item: NeighborhoodItem) => item.depth === 0 && item.sources.includes('semantic-lead');
+  const allocated = contextRankingApplied
+    ? rankingItems.filter(item => isLead(item) || item.semanticScore === undefined || item.semanticScore >= minRelevance)
+    : rankingItems;
+  const belowRelevance = rankingItems.length - allocated.length;
+  if (belowRelevance) notes.push(`${belowRelevance} candidates ranked below relevance ${minRelevance} were left out instead of filling the budget`);
 
   // Budget allocation with a signature level. Pass 1 walks the ranking: a body when it fits, otherwise
   // the signature, otherwise omitted. Pass 2 spends what is left upgrading signatures back to bodies in
@@ -503,7 +537,7 @@ export async function retrieveTaskContext(
   // A large class reached from a lead (constructed or used as a type) is given as its member outline:
   // the agent needs its API, not hundreds of lines of unrelated methods. Leads keep their bodies.
   const outlineOnly = (item: NeighborhoodItem) => item.depth === 1 && item.node.outline === true && item.estimatedTokens > largeClassTokens;
-  for (const item of rankingItems) {
+  for (const item of allocated) {
     if (bodies.some(body => contains(body, item))) { covered.add(item); continue; }
     const signatureCost = signatureTokens(item.node);
     if (outlineOnly(item)) {
@@ -524,7 +558,7 @@ export async function retrieveTaskContext(
       usedTokens += signatureCost;
     }
   }
-  for (const item of rankingItems) {
+  for (const item of allocated) {
     if (levels.get(item) !== 'signature' || item.node.external || outlineOnly(item) || bodies.some(body => contains(item, body) || contains(body, item))) continue;
     const extra = item.estimatedTokens - signatureTokens(item.node);
     if (usedTokens + extra <= tokenBudget) {
@@ -533,15 +567,15 @@ export async function retrieveTaskContext(
       usedTokens += extra;
     }
   }
-  const selected = rankingItems.filter(item => levels.has(item));
-  const omittedPool = rankingItems.filter(item => !levels.has(item) && !covered.has(item));
+  const selected = allocated.filter(item => levels.has(item));
+  const omittedPool = allocated.filter(item => !levels.has(item) && !covered.has(item));
   if (covered.size) notes.push(`${covered.size} candidates were already inside other returned code`);
   const downgraded = selected.filter(item => levels.get(item) === 'signature' && !item.node.external).length;
   if (downgraded) notes.push(`${downgraded} ranking-pool candidates were reduced to signatures by final tokenBudget=${tokenBudget}`);
   if (omittedPool.length) notes.push(`${omittedPool.length} ranking-pool candidates were omitted by final tokenBudget=${tokenBudget}`);
 
   const primaryLead = semanticLeads[0];
-  const lead = (item: NeighborhoodItem) => item.depth === 0 && item.sources.includes('semantic-lead');
+  const lead = isLead;
   const toContextItem = (item: NeighborhoodItem, level: 'body' | 'signature' | 'omitted'): ContextItem => ({
     node: item.node,
     level: item.node.external && level === 'body' ? 'signature' : level,
@@ -555,6 +589,7 @@ export async function retrieveTaskContext(
     depth: item.depth,
     score: item.finalScore,
     ...(item.parameter && !lead(item) ? { parameter: item.parameter } : {}),
+    ...(item.symbol && !lead(item) ? { symbol: item.symbol } : {}),
   });
   const items = selected.map(item => toContextItem(item, levels.get(item)!));
   const omitted = omittedPool.map(item => toContextItem(item, 'omitted'));
@@ -596,6 +631,7 @@ export async function retrieveTaskContext(
     judgeTrace,
     warnings,
     notes,
+    keywords: discovery.keywords,
     discovery,
     semanticLeads,
     neighborhood: { items: compilerItems, stats: neighborhoodStats },

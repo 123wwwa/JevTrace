@@ -92,8 +92,11 @@ export function formatStats(days: number, env: NodeJS.ProcessEnv = process.env, 
     lines.push(`  failed: ${calls.filter(entry => !entry.ok).length}, no relevant code found: ${retrievals.filter(entry => entry.outcome === 'no-context').length}, outside the analysed project: ${retrievals.filter(entry => entry.outcome === 'not-covered').length}`);
     const withSavings = retrievals.filter(entry => entry.candidateTokens !== undefined);
     const candidate = sum(withSavings.map(entry => entry.candidateTokens));
-    const saved = sum(withSavings.map(entry => entry.savedTokens));
-    lines.push(`  tokens: ${n(sum(withSavings.map(entry => entry.returnedTokens)))} sent to the agent, ${n(saved)} excluded from ${n(candidate)} candidates${candidate ? ` (${(saved / candidate * 100).toFixed(1)}%)` : ''}`);
+    const withFiles = withSavings.filter(entry => entry.fileTokens !== undefined);
+    // What came back against the files it comes from, read whole. The candidate pool is JevTrace's own working
+    // set; what it left out says nothing about reading the agent was spared, so it is not called a saving.
+    lines.push(`  tokens: ${n(sum(withSavings.map(entry => entry.returnedTokens)))} sent to the agent${withFiles.length
+      ? ` (${n(sum(withFiles.map(entry => entry.returnedTokens)))} of them from files totalling ${n(sum(withFiles.map(entry => entry.fileTokens)))} read whole)` : ''}; ${n(candidate)} tokens of candidates considered`);
     lines.push(`  Jev: ${n(sum(calls.map(entry => entry.jevRequests)))} requests, ${n(sum(calls.map(entry => entry.jevInputTokens)))} input tokens, $${sum(calls.map(entry => entry.jevCost)).toFixed(4)}`);
     lines.push(`  time: ${(sum(retrievals.map(entry => entry.ms)) / Math.max(retrievals.length, 1) / 1000).toFixed(1)} s per retrieval`);
     const byProject = new Map<string, number>();

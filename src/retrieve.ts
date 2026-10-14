@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import type { KeywordReport } from './discovery.js';
 import type { Candidate, CodeNode, ContextLevel, Dependency, EdgeKind, EntryInput, LanguageAdapter, RelevanceJudge, SourceLocation, Unresolved } from './types.js';
 import { UserFacingError } from './errors.js';
 
@@ -13,6 +14,8 @@ export interface ContextItem {
   score?: number;
   /** For `argument` items: the lead's parameter the value is passed into. */
   parameter?: string;
+  /** For `shared` items: the enum member, constant or configuration key read by both. */
+  symbol?: string;
 }
 export interface JudgeRoundTrace {
   round: number;
@@ -51,6 +54,8 @@ export interface RetrievalResult {
   warnings: string[];
   /** Normal bounds and static-analysis limits, reported for inspection. */
   notes?: string[];
+  /** Task-only retrieval: keyword evidence outside the analysed declarations. */
+  keywords?: KeywordReport;
 }
 export interface RetrievalOptions { maxDepth?: number; maxNodes?: number; tokenBudget?: number; reverse?: boolean; reverseFanIn?: number; wrapperLookahead?: boolean; visitPolicy?: 'score' | 'choice'; bodyThreshold?: number; omitThreshold?: number; signal?: AbortSignal }
 interface Queued { candidate: Candidate; score: number; path: string[]; wrapper: boolean; priority: number }
@@ -253,6 +258,38 @@ export async function retrieve(adapter: LanguageAdapter, judge: RelevanceJudge, 
   return { task, judge: judge.name, status: incomplete ? 'incomplete' : 'complete', entry, items, omitted, unresolved, considered, usedTokens, tokenBudget, visitPolicy, choiceDecisions, wrapperLookahead, bodyThreshold, omitThreshold, reverseFanIn, reversePruned, judgeRounds, judgeTrace, warnings };
 }
 
+const keywordKind = (match: KeywordReport['matches'][number]) => match.kind === 'script' ? 'script without declarations'
+  : match.kind === 'top-level' ? 'module-level code' : /\.html?$/i.test(match.file) ? 'HTML' : 'outside the analysed project';
+
+/**
+ * Keyword evidence for the agent: a first-line notice when the task's keywords are mostly in files JevTrace does
+ * not analyse as code, a line naming keywords nothing in the repository contains (the closest JevTrace comes to
+ * answering "is there any …"), and the matching lines themselves.
+ */
+export function formatKeywords(report: KeywordReport | undefined, returnedBudget?: number): { notice: string[]; section: string[] } {
+  if (!report?.terms.length) return { notice: [], section: [] };
+  const notice: string[] = [];
+  const nonCode = report.matches.filter(match => match.kind !== 'top-level');
+  if (report.outsideFirst && nonCode.length) {
+    notice.push(`Mostly outside the analysed code: the task's keywords are mainly in files JevTrace does not analyse as code. Look there first: ${nonCode.slice(0, 3).map(match => `${match.file} (${match.terms.join(', ')})`).join('; ')}.${returnedBudget ? ` The code below matched fewer keywords and was cut to ~${returnedBudget.toLocaleString('en-US')} tokens.` : ''}`);
+  }
+  if (report.missing.length === report.terms.length) {
+    notice.push(`No keyword match: none of the task's keywords (${report.terms.join(', ')}) appear in any declaration, file path or searched line of this repository. If the question is whether this exists, it probably does not; a Grep can confirm.`);
+  } else if (report.terms.length <= 6 && report.missing.length * 2 >= report.terms.length) {
+    // A short question with half its keywords absent is worth knowing about before reading on; a long task
+    // description always has words the code does not use.
+    notice.push(`Keywords with no match anywhere in this repository: ${report.missing.join(', ')}.`);
+  }
+  const section = report.matches.length ? [
+    '', '## Keyword matches outside the analysed declarations (search these directly)',
+    ...report.matches.flatMap(match => [
+      `- ${match.file} [${match.terms.join(', ')}; ${keywordKind(match)}]`,
+      ...match.lines.map(([line, text]) => `  ${line}: ${text.length > 160 ? `${text.slice(0, 159)}…` : text}`),
+    ]),
+  ] : [];
+  return { notice, section };
+}
+
 /**
  * Renders the context for the agent within maxChars. Code blocks are never cut in the middle: blocks are
  * added in ranking order while they fit, a body that does not fit is given as its signature, and what still
@@ -265,18 +302,19 @@ export function formatContext(result: RetrievalResult, maxChars = 30000): string
   const relation = (item: ContextItem) => {
     if (!item.kind) return '';
     const of = item.path.length > 1 ? ` of ${item.path[item.path.length - 2]}` : '';
+    if (item.kind === 'shared' && item.symbol) return `; also reads ${item.symbol}, like ${item.path[0]}`;
     return item.kind === 'argument' && item.parameter ? `; argument ${item.parameter}${of}` : `; ${item.kind}${of}`;
   };
   // The line that connects an item to the lead: where an argument is passed, or where a caller shown only as
   // a signature makes the call.
   const siteLine = (item: ContextItem, level: ContextLevel) =>
-    item.site?.text && (item.kind === 'argument' || (level === 'signature' && (item.kind === 'caller' || item.kind === 'test')))
-      ? `// ${item.kind === 'argument' ? 'passed at' : 'calls it at'} ${item.site.file}:${item.site.line}: ${item.site.text}\n` : '';
+    item.site?.text && (item.kind === 'argument' || item.kind === 'shared' || (level === 'signature' && (item.kind === 'caller' || item.kind === 'test')))
+      ? `// ${item.kind === 'argument' ? 'passed at' : item.kind === 'shared' ? 'reads it at' : 'calls it at'} ${item.site.file}:${item.site.line}: ${item.site.text}\n` : '';
   const block = (item: ContextItem, level: ContextLevel) => `### ${item.node.name} — ${item.node.file}:${item.node.startLine}-${item.node.endLine} [${level}${relation(item)}${item.score === undefined ? '' : `; relevance ${item.score.toFixed(2)}`}]
 \`\`\`ts
 ${siteLine(item, level)}${level === 'body' ? item.node.source : item.node.signature}
 \`\`\``;
-  const oneLine = (item: ContextItem) => item.kind !== undefined && item.level === 'body' && !['caller', 'test', 'argument'].includes(item.kind)
+  const oneLine = (item: ContextItem) => item.kind !== undefined && item.level === 'body' && !['caller', 'test', 'argument', 'shared'].includes(item.kind)
     && !item.node.source.includes('\n') && item.node.source.length <= 200;
   const compactLine = (item: ContextItem) => `${item.node.source} // ${item.node.file}:${item.node.startLine}`;
   const compactOpen = '### One-line declarations used above\n```ts';
@@ -292,7 +330,11 @@ ${siteLine(item, level)}${level === 'body' ? item.node.source : item.node.signat
       ...(result.unresolved.length > listed ? [`- … and ${result.unresolved.length - listed} more`] : []));
     return lines.join('\n');
   };
+  const keywords = formatKeywords(result.keywords, result.keywords?.outsideFirst ? result.tokenBudget : undefined);
+  // When the answer is mostly outside the analysed code, the keyword matches come before the code.
+  const keywordsFirst = result.keywords?.outsideFirst === true && keywords.section.length > 0;
   const header = (count: number, signatures: number) => [
+    ...keywords.notice,
     `Status: ${result.status} | Context: ${count} of ${result.items.length} symbols shown${signatures ? ` (${signatures} as signatures)` : ''}, ~${result.usedTokens}/${result.tokenBudget} tokens selected`,
     `Task: ${result.task}`,
     `Entry: ${result.entry.file}:${result.entry.startLine} ${result.entry.name}`,
@@ -300,11 +342,14 @@ ${siteLine(item, level)}${level === 'body' ? item.node.source : item.node.signat
     ...(result.notes?.length ? [`Notes: ${result.notes.join('; ')}`] : []),
     // Agents otherwise tend to reread whole files to re-confirm code they were just given.
     'The code below is the current source, linked by the TypeScript compiler. Work from it; read files only for what it does not show.',
+    ...(keywordsFirst ? keywords.section : []),
     '', '## Context',
   ].join('\n');
+  const keywordFooter = keywordsFirst ? [] : keywords.section;
 
   // Start as if nothing fits (every item listed by location), then each item shown gives its location line back.
   let used = header(result.items.length, result.items.length).length + footer([]).length + notShownHeading.join('\n').length + 2
+    + keywordFooter.join('\n').length + 1
     + result.items.reduce((sum, item) => sum + location(item).length + 1, 0);
   const shown = new Map<number, ContextLevel>();
   const compact: number[] = [];
@@ -330,6 +375,7 @@ ${siteLine(item, level)}${level === 'body' ? item.node.source : item.node.signat
     header(shown.size + compact.length, signatures),
     ...[...shown].sort((a, b) => a[0] - b[0]).map(([index, level]) => block(result.items[index], level)),
     ...(compact.length ? [compactOpen, ...compact.map(index => compactLine(result.items[index])), compactClose] : []),
+    keywordFooter.join('\n'),
     footer(notShown),
   ].filter(Boolean).join('\n');
   return text.length > maxChars ? text.slice(0, maxChars - 35) + '\n[Output character limit reached]' : text;

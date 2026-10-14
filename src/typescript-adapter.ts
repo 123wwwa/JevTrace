@@ -127,6 +127,30 @@ function functionOf(node: ts.Node): ts.SignatureDeclaration | undefined {
 }
 /** Bound on argument-source edges per function: a widely called helper should not pull in every caller's data. */
 const maxArgumentSources = 6;
+/** Bounds on shared-reader edges: values read per lead, readers per value, readers in all, and the use count above which a value is a hub. */
+const maxSharedSymbols = 8;
+const maxSharedPerSymbol = 3;
+const maxSharedEdges = 6;
+const maxSharedReferences = 40;
+/** A property of `Object.freeze({…})` or another mapped type is a synthetic symbol with no value declaration; its declarations still point at the source. */
+const declarationOf = (symbol: ts.Symbol | undefined): ts.Declaration | undefined => symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+const isEnumMember = (symbol: ts.Symbol | undefined): boolean => symbol?.valueDeclaration !== undefined && ts.isEnumMember(symbol.valueDeclaration);
+/** A top-level `const` holding data (not a function or class): a threshold, a lookup table, a configuration object. */
+function moduleDataConstant(declaration: ts.Node): boolean {
+  if (!ts.isVariableDeclaration(declaration) || !declaration.initializer || !(declaration.parent.flags & ts.NodeFlags.Const)) return false;
+  const statement = declaration.parent.parent;
+  const initializer = declaration.initializer;
+  return ts.isVariableStatement(statement) && ts.isSourceFile(statement.parent)
+    && !(ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer) || ts.isClassExpression(initializer));
+}
+/** A key of a module-level configuration object, also inside `as const` or `Object.freeze({…})`: `CONFIG.grenade.range`. */
+function configurationKey(declaration: ts.Node): boolean {
+  if (!ts.isPropertyAssignment(declaration) && !ts.isShorthandPropertyAssignment(declaration)) return false;
+  let current: ts.Node = declaration.parent;
+  while (ts.isObjectLiteralExpression(current) || ts.isPropertyAssignment(current) || ts.isAsExpression(current)
+    || ts.isSatisfiesExpression(current) || ts.isParenthesizedExpression(current) || ts.isCallExpression(current)) current = current.parent;
+  return moduleDataConstant(current);
+}
 const isTestFile = (file: string): boolean =>
   /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)/i.test(file) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file);
 /** Language services kept warm across tsconfig projects; switching back to a recent project reuses its program. */
@@ -218,6 +242,12 @@ export class TypeScriptAdapter implements LanguageAdapter {
     return this.cachedScan(`arguments:${node.id}`, () => this.scanArgumentSources(node));
   }
 
+  sharedReaders(node: CodeNode): DependencyScan {
+    if (node.external) return { edges: [], unresolved: [] };
+    this.loadProgram(this.safePath(node.file));
+    return this.cachedScan(`shared:${node.id}`, () => this.scanSharedReaders(node));
+  }
+
   /** Scans are memoized per Program: any edited file yields a new Program and therefore a fresh cache. */
   private cachedScan(key: string, scan: () => DependencyScan): DependencyScan {
     const program = this.program;
@@ -267,6 +297,10 @@ export class TypeScriptAdapter implements LanguageAdapter {
       else if (ts.isExpressionWithTypeArguments(current) && ts.isHeritageClause(current.parent)) {
         add(ts.isPropertyAccessExpression(current.expression) ? current.expression.name : current.expression, 'type', current);
       } else if (values && ts.isIdentifier(current) && isModuleConstant(current)) add(current, 'value', current);
+      // `Mode.Throw`: the enum the lead branches on is part of its contract.
+      else if (values && ts.isPropertyAccessExpression(current) && isEnumMember(this.checker!.getSymbolAtLocation(current.name))) {
+        add(ts.isPropertyAccessExpression(current.expression) ? current.expression.name : current.expression, 'value', current);
+      }
       // The instance state a method works on: `this.bodyCache`, or `const { bodyCache } = this`.
       else if (values && ts.isPropertyAccessExpression(current) && current.expression.kind === ts.SyntaxKind.ThisKeyword) {
         const symbol = this.checker!.getSymbolAtLocation(current.name);
@@ -502,6 +536,75 @@ export class TypeScriptAdapter implements LanguageAdapter {
           if (target.id === node.id || edges.has(target.id) || edges.size >= maxArgumentSources) continue;
           edges.set(target.id, { kind: 'argument', target, site: this.location(source, argument), parameter });
         }
+      }
+    }
+    return { edges: [...edges.values()], unresolved: [] };
+  }
+
+  /**
+   * Functions that read what the lead reads: an enum member (`Mode.Throw`), a module-level constant, or a key of
+   * a module-level configuration object (`CONFIG.grenade.range`). Data flow of this kind (an action mask that
+   * allows `Mode.Throw`, a cooldown both a planner and an executor check) has no call edge between the two.
+   * Widely read values (more than `maxSharedReferences` uses) are skipped as hubs; test files are skipped.
+   */
+  private scanSharedReaders(node: CodeNode): DependencyScan {
+    if (!this.program || !this.service || !this.checker) return { edges: [], unresolved: [] };
+    const program = this.program;
+    const service = this.service;
+    const checker = this.checker;
+    const source = program.getSourceFile(path.resolve(this.root, node.file));
+    const owner = source && this.findNode(source, node);
+    if (!source || !owner) return { edges: [], unresolved: [] };
+
+    const read = new Map<ts.Symbol, { label: string; name: ts.Node }>();
+    const record = (raw: ts.Symbol | undefined, label: string) => {
+      const symbol = raw && raw.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(raw) : raw;
+      const declaration = declarationOf(symbol);
+      if (!symbol || !declaration || read.has(symbol) || read.size >= maxSharedSymbols) return;
+      const name = (declaration as ts.NamedDeclaration).name;
+      const declarationSource = declaration.getSourceFile();
+      if (!name || declarationSource.isDeclarationFile || this.isLibrary(declarationSource) || !this.insideRoot(declarationSource.fileName)) return;
+      if (ts.isEnumMember(declaration) || moduleDataConstant(declaration) || configurationKey(declaration)) read.set(symbol, { label: clip(label, 48), name });
+    };
+    const visit = (current: ts.Node) => {
+      if (ts.isPropertyAccessExpression(current)) {
+        const symbol = checker.getSymbolAtLocation(current.name);
+        const declaration = declarationOf(symbol);
+        if (declaration && (ts.isEnumMember(declaration) || configurationKey(declaration))) {
+          record(symbol, current.getText(source));
+          return;
+        }
+      } else if (ts.isIdentifier(current) && !(ts.isPropertyAccessExpression(current.parent) && current.parent.name === current)
+        && !((current.parent as ts.NamedDeclaration).name === current)) {
+        record(checker.getSymbolAtLocation(current), current.text);
+      }
+      ts.forEachChild(current, visit);
+    };
+    ts.forEachChild(owner, visit);
+
+    const edges = new Map<string, Dependency>();
+    for (const [, { label, name }] of read) {
+      if (edges.size >= maxSharedEdges) break;
+      const declarationSource = name.getSourceFile();
+      const references = (service.findReferences(declarationSource.fileName, name.getStart(declarationSource)) ?? [])
+        .flatMap(group => group.references).filter(reference => !reference.isDefinition);
+      if (references.length > maxSharedReferences) continue;
+      // Readers in other files first: those are the connections a look at the lead's own file does not show.
+      references.sort((a, b) => Number(a.fileName === source.fileName) - Number(b.fileName === source.fileName) || a.fileName.localeCompare(b.fileName) || a.textSpan.start - b.textSpan.start);
+      let perSymbol = 0;
+      for (const reference of references) {
+        if (perSymbol >= maxSharedPerSymbol || edges.size >= maxSharedEdges) break;
+        if (!this.insideRoot(reference.fileName) || isTestFile(path.relative(this.root, reference.fileName).replaceAll('\\', '/'))) continue;
+        const referenceSource = program.getSourceFile(reference.fileName);
+        const site = referenceSource && !referenceSource.isDeclarationFile ? nodeAt(referenceSource, reference.textSpan.start) : undefined;
+        if (!referenceSource || !site || ts.findAncestor(site, ts.isImportDeclaration)) continue;
+        if (referenceSource === source && site.getStart(source) >= owner.getStart(source) && site.getEnd() <= owner.getEnd()) continue;
+        const reader = callerOwner(site) ?? this.componentOwner(referenceSource, site);
+        if (!reader) continue;
+        const target = this.toCodeNode(reader.node, reader.name);
+        if (target.id === node.id || edges.has(target.id)) continue;
+        edges.set(target.id, { kind: 'shared', target, site: this.location(referenceSource, site), symbol: label });
+        perSymbol++;
       }
     }
     return { edges: [...edges.values()], unresolved: [] };

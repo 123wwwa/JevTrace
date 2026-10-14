@@ -38,20 +38,25 @@ export interface SessionSavingsStats {
   retrievals: number;
   candidateTokens: number;
   returnedTokens: number;
+  /** Left out of JevTrace's own candidate pool: not reading the agent was spared, which it cannot see. */
   savedTokens: number;
   reductionPercent: number;
+  /** The returned code's files read whole: the comparison an agent can act on. */
+  fileTokens: number;
 }
 
 /** Running totals over every task-only retrieval since the server started (in memory, reset on restart). */
 export class SessionSavings {
-  private stats: SessionSavingsStats = { retrievals: 0, candidateTokens: 0, returnedTokens: 0, savedTokens: 0, reductionPercent: 0 };
+  private stats: SessionSavingsStats = { retrievals: 0, candidateTokens: 0, returnedTokens: 0, savedTokens: 0, reductionPercent: 0, fileTokens: 0 };
 
-  record(candidateTokens: number, returnedTokens: number): SessionSavingsStats {
+  /** `fileTokens`: the returned code's files read whole, when known. */
+  record(candidateTokens: number, returnedTokens: number, fileTokens = 0): SessionSavingsStats {
     const retrievals = this.stats.retrievals + 1;
     const candidate = this.stats.candidateTokens + candidateTokens;
     const returned = this.stats.returnedTokens + returnedTokens;
     const saved = this.stats.savedTokens + Math.max(0, candidateTokens - returnedTokens);
-    this.stats = { retrievals, candidateTokens: candidate, returnedTokens: returned, savedTokens: saved, reductionPercent: candidate ? saved / candidate : 0 };
+    this.stats = { retrievals, candidateTokens: candidate, returnedTokens: returned, savedTokens: saved, reductionPercent: candidate ? saved / candidate : 0,
+      fileTokens: this.stats.fileTokens + fileTokens };
     return this.snapshot();
   }
 
@@ -139,7 +144,7 @@ export function summarizeContextSavings(result: QuerySuccess, totalMs: number, l
     stage4Ms: result.contextRankingLatencyMs,
     totalMs,
     latencyStats,
-    session: session && candidateTokens !== undefined ? session.record(candidateTokens, result.usedTokens) : session?.snapshot(),
+    session: session && candidateTokens !== undefined ? session.record(candidateTokens, result.usedTokens, wholeFiles) : session?.snapshot(),
     status: result.status,
     warningCount: result.warnings.length,
   };
