@@ -17,6 +17,8 @@ const ignored = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.
  */
 export const defaultMaxFiles = 20_000;
 const sourceFile = /\.(?:[cm]?[jt]sx?|vue)$/;
+/** Markup with inline scripts and handlers: never analysed as code, but searched by keyword. */
+const markupFile = /\.html?$/i;
 const declarationFile = /\.d\.[cm]?ts$/;
 const stopWords = new Set('a an the is are to of for in on and or how change fix add implement with when should from'.split(' '));
 const tokenize = (text: string): string[] =>
@@ -48,8 +50,53 @@ interface SearchFields {
 }
 
 const testFile = /(?:^|[/.])(?:__tests__|test|tests|spec)(?:[/.]|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/i;
-/** `unanalysedFiles`: sources inside a config's directory that it neither includes nor imports, minus git-ignored ones. */
-type ScanResult = { nodes: CodeNode[]; scannedFiles: number; warnings: string[]; unanalysedFiles: string[] };
+/**
+ * `unanalysedFiles`: sources inside a config's directory that it neither includes nor imports, minus git-ignored ones.
+ * `textFiles`: HTML files and those unanalysed sources, read for keyword search only.
+ */
+type ScanResult = { nodes: CodeNode[]; scannedFiles: number; warnings: string[]; unanalysedFiles: string[]; textFiles: string[] };
+/** A source line kept for keyword search: top-level code outside every indexed declaration, or a line of a text-only file. */
+type TextLine = [line: number, text: string];
+/** Bounds on what keyword search keeps: lines longer than this are minified or data, and files beyond these caps are skipped. */
+const maxTextLineChars = 400;
+const maxTextLinesPerFile = 3000;
+const maxTextFiles = 2000;
+/** Words too common in task descriptions to say anything about where the code is. */
+const keywordStopWords = new Set(('where what which why does work works used use using uses code function functions file files call calls called '
+  + 'handle handled handles handling this that there here into about also then than them they have has been being make makes made would could '
+  + 'need needs find show get gets set sets new old all any each every only some same other like more most less not but can will its our your '
+  + 'their via per out over under after before during while whether exist exists existing case cases logic behavior behaviour flow path value '
+  + 'values data type types option options change changes fix add implement implemented support supported check checks checked repository '
+  + 'project structure part parts way ways thing things happen happens when should from with the and for are how '
+  + 'slow fast come comes goes going right wrong properly correctly actually really still just even instead again done doing '
+  + 'there know want look looks seem seems right same better worse good bad').split(' '));
+/** The task's searchable keywords: ASCII words (identifiers are), longer than two letters, minus filler. */
+export const keywordTerms = (task: string): string[] =>
+  unique(tokenize(task).filter(term => term.length > 2 && /^[a-z][a-z0-9]*$/.test(term) && !stopWords.has(term) && !keywordStopWords.has(term)));
+/** A token matches a keyword exactly, or by prefix for keywords of four letters or more (sound → sounds, throw → throwing). */
+const matchesTerm = (token: string, term: string): boolean => token === term || (term.length >= 4 && token.startsWith(term));
+const keepTextLine = (text: string): boolean => text.length > 0 && text.length <= maxTextLineChars
+  && !/^(?:\/\/|\/\*|\*|<!--|import\b|export\s*\{|\}?\s*from\s)/.test(text);
+
+/** Keyword evidence for one file, outside the code the compiler analyses as declarations. */
+export interface KeywordMatch {
+  file: string;
+  /** text: HTML or a source outside the analysed project; script: an analysed source with no declarations;
+   *  top-level: module-level code of an analysed source (configuration, wiring). */
+  kind: 'text' | 'script' | 'top-level';
+  terms: string[];
+  lines: TextLine[];
+}
+export interface KeywordReport {
+  terms: string[];
+  /** Keywords that no declaration, file path or searched line in the repository contains. */
+  missing: string[];
+  matches: KeywordMatch[];
+  /** Most keywords found by the best analysed declaration. */
+  codeTerms: number;
+  /** The task's keywords are mostly in files JevTrace does not analyse as code (`text` or `script` matches). */
+  outsideFirst: boolean;
+}
 /** At most this many unanalysed files are listed; they are shown by path only. */
 const maxUnanalysedFiles = 2000;
 /**
@@ -156,6 +203,8 @@ export interface DiscoveryResult {
   warnings: string[];
   /** Directories outside the analysed project that Jev judged relevant, strongest first. */
   unanalysedLeads: UnanalysedLead[];
+  /** Keyword evidence outside the analysed declarations, and keywords nothing in the repository contains. */
+  keywords?: KeywordReport;
 }
 
 function buildTree(files: string[]): string {
@@ -225,7 +274,9 @@ function directoryScopes(allFiles: string[], splitRoot = false): { buckets: Map<
 
 /** Lightweight compiler AST inventory. Type checking is deferred until graph resolution. */
 export class RepositoryIndex {
-  private cache = new Map<string, { version: string; nodes: CodeNode[]; fields: Map<string, SearchFields> }>();
+  private cache = new Map<string, { version: string; nodes: CodeNode[]; fields: Map<string, SearchFields>; outside: TextLine[]; blob: string }>();
+  /** Text-only files (HTML, sources outside the analysed project), read for keyword search. */
+  private textCache = new Map<string, { version: string; lines: TextLine[]; blob: string }>();
   constructor(readonly root: string) {}
 
   scan(maxFiles: number, signal?: AbortSignal): ScanResult {
@@ -245,6 +296,7 @@ export class RepositoryIndex {
     let scannedFiles = 0;
     let limitReached: string | undefined;
     const unanalysed: string[] = [];
+    const markup: string[] = [];
     const skippedDirectories: string[] = [];
     const walk = (directory: string): void => {
       signal?.throwIfAborted();
@@ -257,6 +309,8 @@ export class RepositoryIndex {
         const full = path.join(directory, entry.name);
         if (entry.isDirectory() && !ignored.has(entry.name) && !entry.name.startsWith('.')) {
           walk(full);
+        } else if (entry.isFile() && markupFile.test(entry.name)) {
+          if (markup.length < maxTextFiles) markup.push(path.relative(this.root, full).replaceAll('\\', '/'));
         } else if (entry.isFile() && sourceFile.test(entry.name) && !declarationFile.test(entry.name)) {
           // Only files a project includes count toward the limit; excluded ones are never indexed, only listed.
           if (excluded(path.resolve(full))) {
@@ -345,7 +399,16 @@ export class RepositoryIndex {
               ts.forEachChild(node, child => visit(child, isContainer && ownName ? [...parents, ownName] : parents));
             };
             visit(source, []);
-            cached = { version, nodes: declarations, fields };
+            // Module-level code outside every declaration (wiring, event handlers, configuration objects) is
+            // kept for keyword search; a browser script may consist of nothing else.
+            const covered = new Set<number>();
+            for (const declaration of declarations) for (let line = declaration.startLine; line <= declaration.endLine; line++) covered.add(line);
+            const outside: TextLine[] = [];
+            for (const [index, line] of text.split(/\r?\n/).entries()) {
+              const trimmed = line.trim();
+              if (outside.length < maxTextLinesPerFile && !covered.has(index + 1) && keepTextLine(trimmed)) outside.push([index + 1, trimmed.slice(0, 200)]);
+            }
+            cached = { version, nodes: declarations, fields, outside, blob: outside.map(([, line]) => line).join('\n').toLowerCase() };
             this.cache.set(full, cached);
           }
           nodes.push(...cached.nodes);
@@ -357,7 +420,121 @@ export class RepositoryIndex {
     if (skippedNote) warnings.push(skippedNote);
     if (limitReached) warnings.push(`Discovery file limit reached (${maxFiles} source files): ${limitReached} and later paths (in name order) were not searched; raise maxFiles to search them`);
     for (const file of this.cache.keys()) if (!seen.has(file)) this.cache.delete(file);
-    return { nodes, scannedFiles, warnings: unique(warnings), unanalysedFiles: this.withoutIgnored(unanalysed) };
+    // One git check for both lists: the ignore check caches only its latest input.
+    const kept = new Set(this.withoutIgnored([...unanalysed, ...markup]));
+    const unanalysedFiles = unanalysed.filter(file => kept.has(file));
+    const textFiles = [...unanalysedFiles, ...markup.filter(file => kept.has(file))];
+    const textSeen = new Set<string>();
+    for (const file of textFiles) {
+      signal?.throwIfAborted();
+      const full = path.resolve(this.root, file);
+      textSeen.add(full);
+      this.readText(full);
+    }
+    for (const file of this.textCache.keys()) if (!textSeen.has(file)) this.textCache.delete(file);
+    return { nodes, scannedFiles, warnings: unique(warnings), unanalysedFiles, textFiles };
+  }
+
+  /** Reads a text-only file into the keyword cache; unchanged files (same mtime and size) are not read again. */
+  private readText(full: string): void {
+    let stat: fs.BigIntStats;
+    try { stat = fs.statSync(full, { bigint: true }); } catch { return; }
+    const version = `${stat.mtimeNs}:${stat.size}`;
+    if (this.textCache.get(full)?.version === version) return;
+    const lines: TextLine[] = [];
+    if (stat.size <= 1024n * 1024n) {
+      let raw = '';
+      try { raw = fs.readFileSync(full, 'utf8'); } catch { /* unreadable: nothing to search */ }
+      for (const [index, line] of raw.split(/\r?\n/).entries()) {
+        const trimmed = line.trim();
+        if (lines.length < maxTextLinesPerFile && keepTextLine(trimmed)) lines.push([index + 1, trimmed.slice(0, 200)]);
+      }
+    }
+    this.textCache.set(full, { version, lines, blob: lines.map(([, line]) => line).join('\n').toLowerCase() });
+  }
+
+  /**
+   * Keyword evidence for a task beyond the declarations lexical ranking sees: which keywords nothing in the
+   * repository contains, and which files outside the analysed declarations (HTML, unanalysed or
+   * declaration-less scripts, module-level code) contain them, with the matching lines.
+   */
+  keywordReport(task: string, inventory: ScanResult, lexical: { candidates: RankedNode[]; documentTerms: Map<string, number> }): KeywordReport {
+    const terms = keywordTerms(task);
+    if (!terms.length) return { terms, missing: [], matches: [], codeTerms: 0, outsideFirst: false };
+    const tokenSets = new Map<string, Set<string>>();
+    const tokensOf = (text: string) => {
+      let tokens = tokenSets.get(text);
+      if (!tokens) tokenSets.set(text, tokens = new Set(tokenize(text)));
+      return tokens;
+    };
+    const termsIn = (tokens: Iterable<string>) => {
+      const found = new Set<string>();
+      for (const token of tokens) for (const term of terms) if (matchesTerm(token, term)) found.add(term);
+      return found;
+    };
+    const codeFound = termsIn(lexical.documentTerms.keys());
+    // Analysed code is compared file by file, like the files it competes with: the declarations of the files
+    // lexical ranking matched, with their paths.
+    const codeFiles = new Map<string, Set<string>>();
+    for (const candidate of lexical.candidates) {
+      const fields = this.fieldsOf(candidate.node);
+      if (!fields || testFile.test(candidate.node.file)) continue;
+      const found = codeFiles.get(candidate.node.file) ?? new Set<string>();
+      for (const term of termsIn([...fields.name, ...fields.path, ...fields.signature, ...fields.identifiers, ...fields.literals])) found.add(term);
+      codeFiles.set(candidate.node.file, found);
+    }
+    const codeTerms = Math.max(0, ...[...codeFiles.values()].map(found => found.size));
+
+    const matches: KeywordMatch[] = [];
+    // Tests repeat a task's words around fixtures; they are reached as test edges of the code instead.
+    const search = (file: string, kind: KeywordMatch['kind'], lines: TextLine[], blob: string) => {
+      if (testFile.test(file)) {
+        if (terms.some(term => blob.includes(term))) for (const line of lines) for (const term of termsIn(tokensOf(line[1]))) codeFound.add(term);
+        return;
+      }
+      const pathTerms = termsIn(tokenize(file));
+      if (![...terms].some(term => blob.includes(term)) && !pathTerms.size) return;
+      const found = new Set(pathTerms);
+      const scored: Array<{ line: TextLine; count: number }> = [];
+      for (const line of lines) {
+        const lower = line[1].toLowerCase();
+        if (!terms.some(term => lower.includes(term))) continue;
+        const inLine = termsIn(tokensOf(line[1]));
+        if (!inLine.size) continue;
+        for (const term of inLine) found.add(term);
+        scored.push({ line, count: inLine.size });
+      }
+      // A path alone is evidence for a text file (env/viewer/sound.js) but not for module-level code.
+      if (!scored.length && kind === 'top-level') return;
+      if (!found.size) return;
+      const best = scored.sort((a, b) => b.count - a.count || a.line[0] - b.line[0]).slice(0, 3).map(item => item.line).sort((a, b) => a[0] - b[0]);
+      matches.push({ file, kind, terms: terms.filter(term => found.has(term)), lines: best });
+    };
+    for (const file of inventory.textFiles) {
+      const cached = this.textCache.get(path.resolve(this.root, file));
+      if (cached) search(file, 'text', cached.lines, cached.blob);
+    }
+    for (const [full, cached] of this.cache) {
+      const file = path.relative(path.resolve(this.root), full).replaceAll('\\', '/');
+      search(file, cached.nodes.length ? 'top-level' : 'script', cached.outside, cached.blob);
+    }
+    for (const match of matches) for (const term of match.terms) codeFound.add(term);
+    const nonCode = (match: KeywordMatch) => match.kind !== 'top-level';
+    matches.sort((a, b) => b.terms.length - a.terms.length || Number(nonCode(b)) - Number(nonCode(a))
+      || b.lines.length - a.lines.length || a.file.localeCompare(b.file));
+    const bestOutside = matches.find(nonCode)?.terms.length ?? 0;
+    return {
+      terms,
+      missing: terms.filter(term => !codeFound.has(term)),
+      // Module-level matches are listed only when they carry at least two keywords (or the task has one).
+      matches: matches.filter(match => nonCode(match) || match.terms.length >= Math.min(2, terms.length)).slice(0, 6),
+      codeTerms,
+      outsideFirst: bestOutside >= Math.min(2, terms.length) && bestOutside > codeTerms,
+    };
+  }
+
+  private fieldsOf(node: CodeNode): SearchFields | undefined {
+    return this.cache.get(path.resolve(this.root, node.file))?.fields.get(node.id);
   }
 
   private ignoredCache?: { key: string; kept: string[] };
@@ -456,6 +633,7 @@ export class RepositoryIndex {
     return {
       ...inventory,
       candidates: fused.slice(0, maxCandidates),
+      documentTerms: df,
       fileScores,
       totalRanked: fused.length,
       signalRanks: { bm25: bm25Rank.length, exact: exactRank.length, path: pathRank.length },
@@ -590,6 +768,7 @@ export async function discoverEntries(
   const inventory = index.scan(maxFiles, options.signal);
   const lexical = index.lexicalRank(task, maxCandidates, maxFiles, options.signal, inventory);
   const lexicalCandidates = lexical.candidates.map(toLead);
+  const keywords = index.keywordReport(task, inventory, lexical);
   const warnings = [...lexical.warnings];
   if (lexical.totalRanked > lexicalCandidates.length) {
     warnings.push(`Lexical RRF retained ${lexicalCandidates.length} of ${lexical.totalRanked} matched declarations`);
@@ -622,6 +801,7 @@ export async function discoverEntries(
       stageLatencyMs: { directory: 0, file: 0, symbol: 0 },
       warnings,
       unanalysedLeads: [],
+      keywords,
     };
   };
 
@@ -706,6 +886,7 @@ export async function discoverEntries(
         stageLatencyMs: { directory: directoryLatencyMs, file: 0, symbol: 0 },
         warnings,
         unanalysedLeads,
+        keywords,
       };
     }
     if (unanalysedLeads.length) warnings.push(`Also relevant, not analysed by JevTrace (outside the TypeScript project; search these directly): ${describeUnanalysed(unanalysedLeads)}`);
@@ -873,6 +1054,7 @@ export async function discoverEntries(
       stageLatencyMs: { directory: directoryLatencyMs, file: fileLatencyMs, symbol: symbolLatencyMs },
       warnings,
       unanalysedLeads,
+      keywords,
     };
   }
 }

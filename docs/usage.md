@@ -14,7 +14,7 @@ JevTrace analyses JavaScript and TypeScript through the TypeScript compiler, so 
 
 | | Supported | Not supported |
 | --- | --- | --- |
-| Files | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`; `.vue` single-file components (`<script>` and `<script setup>`, JS or TS) | Vue template expressions (a method called only from the template shows no caller); `.svelte`, `.astro`, scripts inside HTML; `.d.ts` files are not entry points |
+| Files | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`; `.vue` single-file components (`<script>` and `<script setup>`, JS or TS) | Vue template expressions (a method called only from the template shows no caller); `.svelte`, `.astro`, scripts inside HTML (HTML files are searched by keyword only, see below); `.d.ts` files are not entry points |
 | Modules | ES modules, CommonJS (`require`, `module.exports`, `exports.x`), TypeScript path aliases, including `.vue` imports through them | Dynamic `import()` / `require` with computed paths |
 | Project config | `tsconfig*.json` and `jsconfig*.json`, several per repository (monorepos: each file uses the most specific project that includes it); a base config that is not installed (`"extends": "@org/tsconfig"` before `npm install`) is skipped with a note | Build-tool-only aliases (webpack/Vite `resolve.alias`) that are not mirrored in `paths` |
 | No config | Every source file, analysed with `allowJs`; above 5,000 files the compiler loads the files around the entry (its highest ancestor directory holding at most 5,000), and imports outside it are still followed | Callers outside that directory in such a repository |
@@ -130,13 +130,13 @@ Check the connection with `claude mcp list` or `/mcp` inside Claude Code, then a
 
 ### Usage log and `stats`
 
-Every MCP tool call is appended to `~/.jevtrace/usage.jsonl`: time, tool, project, task, outcome, time taken, tokens sent and excluded, and Jev requests, input tokens and cost. It stays on your machine. Set `JEVTRACE_USAGE_LOG=off` to disable it or to a path to move it.
+Every MCP tool call is appended to `~/.jevtrace/usage.jsonl`: time, tool, project, task, outcome, time taken, tokens of code sent, the size of the files that code comes from read whole, the candidate pool, and Jev requests, input tokens and cost. It stays on your machine. Set `JEVTRACE_USAGE_LOG=off` to disable it or to a path to move it.
 
 ```bash
 node /absolute/JevTrace/dist/cli.js stats --days 7
 ```
 
-To see what the agent itself receives for a task (Claude Code shows the model the structured result, which carries the same bounded context as the text), run:
+To see what the agent itself receives for a task (the text content; the retrieval tools return no `structuredContent`, which Claude Code would otherwise show the model in place of the text), run:
 
 ```bash
 node --env-file=.env scripts/agent-view.mjs /absolute/project "Describe the change you want"
@@ -156,7 +156,7 @@ node --env-file=.env scripts/agent-view.mjs /absolute/project "Describe the chan
 
 Discovery and task-only retrieval accept `maxCandidates` (default 64), `maxLeads` (default 4), `maxFiles` (default 3000), `maxRelevantDirectories` (default 8), `maxJevFiles` (default 256 after directory selection), and `maxRelevantFiles` (default 8). Lexical hints are visible to Jev but never restrict the semantic search space. Semantic thresholds remain provisional.
 
-For task-only retrieval, `tokenBudget` (default 8000 estimated tokens) is the final context budget. `perLeadNodeLimit` (default 24), `perLeadTokenBudget` (defaults to the final budget), `reverseFanIn` (default 12), and `neighborhoodTokenBudget` (default twice the final budget) bound compiler expansion before remote context ranking. Lexical candidates guide discovery but are not merged into the final pool unless enabled (`--lexical-final-merge` in the CLI, `includeLexicalParallel=true` over MCP). `contextRanking=jev` calls Stage 4 only when the final pool exceeds `tokenBudget`; `contextRanking=structural` disables Stage 4.
+For task-only retrieval, `tokenBudget` (default 8000 estimated tokens) is the final context budget. `perLeadNodeLimit` (default 24), `perLeadTokenBudget` (defaults to the final budget), `reverseFanIn` (default 12), and `neighborhoodTokenBudget` (default twice the final budget) bound compiler expansion before remote context ranking. Lexical candidates guide discovery but are not merged into the final pool unless enabled (`--lexical-final-merge` in the CLI, `includeLexicalParallel=true` over MCP). `contextRanking=jev` calls Stage 4 only when the final pool exceeds `tokenBudget`; `contextRanking=structural` disables Stage 4. The budget is a ceiling, not a target: candidates Stage 4 scores below `minRelevance` (default 0.3, the explicit-entry path's omit threshold) are left out even when there is room, and a note counts them.
 
 ### Broad tasks
 
@@ -180,16 +180,26 @@ Discovery's first stage shows those directories to Jev next to the analysed ones
 
 In a repository whose analysed code is one directory, this adds the directory request that is otherwise skipped whenever unanalysed directories exist.
 
+### Keyword search beyond the analysed declarations
+
+Every retrieval also searches, by keyword, what the compiler does not analyse as declarations: HTML files, those unanalysed sources, scripts with no declarations (a browser script made of event handlers), and module-level code of analysed files (wiring, configuration objects). Keywords are the task's ASCII words of three letters or more, minus filler ("where", "flow", "slow"); a keyword also matches longer words it starts (`sound` → `sounds`). Test files are not listed, since tests are reached as test edges of the code.
+
+- **The answer is mostly there**: when a file that is not analysed as code (HTML, an unanalysed source, a declaration-less script) holds more of the task's keywords than any analysed file, the result says so on its first line, lists the matching lines before the code, and cuts the code to about 2,000 tokens.
+- **Otherwise** up to six files with matching lines are listed after the code (module-level matches only with at least two keywords).
+- **Keywords nothing contains**: when none of the keywords occurs in any declaration, path or searched line, the result says that the thing asked about probably does not exist; for a short question (six keywords or fewer) with half of them absent, it names the missing ones. A task with no ASCII keywords (written in Korean, say) reports nothing.
+
+On the 19 benchmark tasks (Ky, Hono, jevgrep) none is reported as mostly outside the analysed code.
+
 Explicit file/line retrieval keeps the `maxDepth`, `maxNodes`, threshold, reverse, wrapper-lookahead, and visit-policy controls.
 
 ### Token savings
 
-Nothing is shown in the chat on its own. Every task-only result ends with a short `Session so far:` line for the agent, and the same totals are in the structured result as `contextSavings.session`. To see the savings when you want to:
+Nothing is shown in the chat on its own. Each task-only result starts with one line comparing the code returned with the files it comes from, `Estimated context: ~N tokens of code from F files (those files read whole: ~M tokens).` The other figures (returned symbols with scores, the ranking pool, session totals) are in the result's `_meta["jevtrace/result"]`, which hosts keep out of the model's context, so the agent does not read them twice. To see the totals when you want to:
 
 - **Ask the agent**, for example "How many tokens has JevTrace saved?". It calls the `usage_stats` tool, which returns the usage-log summary for the last 30 days (or `days`) plus the totals since this server started. The tool is described to agents as for that question only, so it is not called during coding tasks. To answer quickly it reads the newest 64 MB of session transcripts and says how many older ones it left out; `stats` in a terminal reads them all.
 - **Run `stats`** in a terminal (see [Usage log and `stats`](#usage-log-and-stats)).
 
-The reduction number is scoped to `final ranking pool -> returned context`. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.
+Both `usage_stats` and `stats` report tokens of code sent against the size of the files it came from read whole, and the candidate pool JevTrace considered. They do not call the difference a saving: what JevTrace left out of its own candidates is not reading the agent was spared, since agents still open files after a result. Token counts use a source-size estimator (about characters divided by four); they are **not provider billing tokens and not a claim about end-to-end agent cost**. Latency history and session totals are in-memory only and reset when the server restarts; the usage log keeps every call.
 
 ## Benchmarks
 
