@@ -614,7 +614,7 @@ test('errors are explained with what to do next, and a home directory is refused
   assert.match(explain(new Error('Cannot read properties of undefined')), /unexpected error\. Please report it .*issues/);
   assert.match(explainError(new Error('Cannot read properties of undefined')), /\(Cannot read properties of undefined\)$/, 'the original error is kept for reports');
   assert.equal(explainError(new UserFacingError('Setup cancelled; nothing was saved.')), 'Setup cancelled; nothing was saved.');
-  assert.match(explain(new Error('Decision request failed (401): Unauthorized')), /a running server uses it from the next call\. A key set in the environment/);
+  assert.match(explain(new Error('Decision request failed (401): Unauthorized')), /the running JevTrace server restarts with it on its next call, without restarting the agent\. A key set in the environment/);
   assert.match(explain(new Error('Jev response has no answers')), /answered in a format JevTrace does not understand/);
   assert.equal(explainError(AbortSignal.abort().reason), 'The request was cancelled before JevTrace finished.');
 

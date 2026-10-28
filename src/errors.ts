@@ -37,7 +37,7 @@ export function explainError(error: unknown): string {
   // Provider responses: "Decision request failed (401): ..."
   const status = Number(/failed \((\d{3})\)/.exec(message)?.[1]);
   if (status === 401 || status === 403) {
-    return `The Jev provider rejected the API key. Run \`npx -y jevtrace setup\` in a terminal to enter a new one; a running server uses it from the next call. A key set in the environment (for example OPENROUTER_API_KEY in the MCP registration) overrides the saved one, so change it there if you set one.${original}`;
+    return `The Jev provider rejected the API key. Run \`npx -y jevtrace setup\` in a terminal to enter a new one; the running JevTrace server restarts with it on its next call, without restarting the agent. A key set in the environment (for example OPENROUTER_API_KEY in the MCP registration) overrides the saved one, so change it there if you set one.${original}`;
   }
   if (status === 402) {
     return `The Jev provider says the account has no credits left. Add credits with the provider, or switch provider with \`npx -y jevtrace setup\`.${original}`;

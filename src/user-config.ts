@@ -43,8 +43,8 @@ export function readUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
 }
 
 /**
- * The config file's text, or a marker when there is none: a running server compares it between calls so a key
- * or provider changed with `jevtrace setup` takes effect without restarting the agent.
+ * The config file's text, or a marker when there is none: the supervisor compares it before each request and
+ * restarts the server when a key or provider changed with `jevtrace setup`, without restarting the agent.
  */
 export function userConfigStamp(env: NodeJS.ProcessEnv = process.env): string {
   const file = userConfigPath(env);

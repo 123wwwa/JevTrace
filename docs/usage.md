@@ -116,6 +116,8 @@ Running the CLI without `query` or `discover` starts a stdio MCP server for the 
 
 This repository's `.vscode/mcp.json` runs the server against the checkout itself, reading credentials from `.env`.
 
+The process the host starts keeps the host's stdio connection and runs the server itself as a child process. When `setup` saves a different key or provider, the next call restarts that child with it: the host's `initialize` is replayed to the new process, so the agent keeps its session and its tools, while the server starts from scratch (session totals in `usage_stats` start again). The restart waits until no call is in flight. If the child stops on its own, its open calls get an error and the next call starts it again. `JEVTRACE_WORKER=1` runs the server directly, without this supervisor, for debugging.
+
 ### Claude Code
 
 Register once for all your projects. Without `--root`, the server searches the project Claude Code is working in (it reads `CLAUDE_PROJECT_DIR`, which Claude Code sets for MCP servers; user-scope servers otherwise start in `~/.claude`). After `setup`, the server reads the saved provider and key, so nothing secret goes into Claude Code's configuration:

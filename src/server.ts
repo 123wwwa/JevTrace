@@ -89,8 +89,8 @@ export function createServer(root = process.cwd()): McpServer {
   };
   const retrievalLatencies = new RetrievalLatencyWindow(50);
   const sessionSavings = new SessionSavings();
-  // Rebuilt when the saved config changes: after `jevtrace setup` fixes a rejected key, the next call uses the
-  // new one without restarting the agent. A config that no longer loads is reported, not silently ignored.
+  // Rebuilt when the saved config changes. Under the supervisor (src/supervisor.ts) the whole server restarts
+  // first; this covers a server started directly. A config that no longer loads is reported, not silently ignored.
   // Size of a returned file read whole: what reading it with a file tool would cost instead.
   const fileTokens = (file: string): number | undefined => {
     try { return Math.ceil(fs.statSync(path.resolve(projectRoot, file)).size / 4); } catch { return undefined; }

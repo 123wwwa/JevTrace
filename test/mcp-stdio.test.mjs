@@ -362,7 +362,7 @@ test('a wrong tool argument is explained as it is, not as an unexpected error to
   assert.match(text(ambiguous), /^No declaration found at src\/auth\.ts:doesNotExist$/);
 });
 
-test('a rejected key is reported first, and a key saved by setup is used without restarting the server', async t => {
+test('a rejected key is reported first, and a key saved by setup restarts the server behind the same connection', async t => {
   const http = await import('node:http');
   const keys = [];
   const provider = http.createServer((request, response) => {
@@ -403,6 +403,10 @@ test('a rejected key is reported first, and a key saved by setup is used without
   assert.doesNotMatch(text(accepted), /Jev could not be used/);
   assert.equal(keys.at(-1), 'Bearer working-key');
   assert.ok(keys.includes('Bearer expired-key'));
+  assert.match(stderr(), /jevtrace: the saved provider settings changed; restarting the JevTrace server with them/);
+  // A fresh process: the in-memory session totals start again from this call.
+  const stats = await client.callTool({ name: 'usage_stats', arguments: {} });
+  assert.match(text(stats), /This server session: [\d,]+ tokens of code sent across 1 retrieval\b/);
 });
 
 test('usage_stats and `stats` survive a damaged log and unreadable transcripts, and the tool bounds its scan', async t => {
@@ -447,4 +451,87 @@ test('a task whose keywords occur nowhere gets that answer instead of an empty r
   const result = await client.callTool({ name: 'retrieve_dependency_context', arguments: { task: 'zzqx wobble frobnicate' } });
   assert.ok(!result.isError, text(result));
   assert.match(text(result), /No keyword match: none of the task's keywords \(zzqx, wobble, frobnicate\) appear/);
+});
+
+
+test('the supervisor restarts its worker between requests when the stamp changes, replaying the handshake', async t => {
+  const { PassThrough } = await import('node:stream');
+  const { superviseStdio } = await import('../dist/supervisor.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jevtrace-supervisor-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // A stand-in MCP server: answers with its pid and what it has seen of the handshake.
+  const worker = path.join(dir, 'worker.mjs');
+  fs.writeFileSync(worker, `
+    let initialized = false, initializes = 0, buffer = '';
+    const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('end', () => process.exit(0));
+    process.stdin.on('data', chunk => {
+      buffer += chunk;
+      for (let index; (index = buffer.indexOf('\\n')) >= 0;) {
+        const message = JSON.parse(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+        if (message.method === 'initialize') { initializes++; reply(message.id, { pid: process.pid }); }
+        else if (message.method === 'notifications/initialized') initialized = true;
+        else if (message.method === 'crash') process.exit(3);
+        else if (message.method === 'hang') {}
+        else if (message.id !== undefined) reply(message.id, { pid: process.pid, initialized, initializes });
+      }
+    });`);
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const logs = [];
+  let stamp = 'a';
+  const done = superviseStdio({ command: process.execPath, args: [worker], env: process.env, stamp: () => stamp, input, output, log: line => logs.push(line) });
+  const received = [];
+  const waiting = new Map();
+  let buffer = '';
+  output.setEncoding('utf8');
+  output.on('data', chunk => {
+    buffer += chunk;
+    for (let index; (index = buffer.indexOf('\n')) >= 0;) {
+      const message = JSON.parse(buffer.slice(0, index));
+      buffer = buffer.slice(index + 1);
+      received.push(message);
+      waiting.get(message.id)?.(message);
+    }
+  });
+  let id = 0;
+  const request = method => new Promise(resolve => {
+    const requestId = ++id;
+    waiting.set(requestId, resolve);
+    input.write(JSON.stringify({ jsonrpc: '2.0', id: requestId, method }) + '\n');
+  });
+  const notify = (method, params) => input.write(JSON.stringify({ jsonrpc: '2.0', method, ...(params ? { params } : {}) }) + '\n');
+
+  const first = (await request('initialize')).result.pid;
+  notify('notifications/initialized');
+  assert.deepEqual((await request('tools/call')).result, { pid: first, initialized: true, initializes: 1 });
+
+  stamp = 'b';
+  const restarted = (await request('tools/call')).result;
+  assert.notEqual(restarted.pid, first, 'a new worker process');
+  assert.equal(restarted.initialized, true, 'the handshake was replayed to it');
+  assert.equal(restarted.initializes, 1);
+  assert.deepEqual(received.map(message => message.id), [1, 2, 3], 'the replayed initialize is not answered to the host');
+  assert.match(logs.join('\n'), /restarting the JevTrace server/);
+
+  // Not while a request is open: its answer would be lost. A cancelled request is never answered, so it does not hold a restart back.
+  const hanging = request('hang');
+  stamp = 'c';
+  assert.equal((await request('tools/call')).result.pid, restarted.pid);
+  notify('notifications/cancelled', { requestId: 4 });
+  const third = (await request('tools/call')).result.pid;
+  assert.notEqual(third, restarted.pid);
+
+  // A worker that dies answers its open request with an error; the next request starts a new one.
+  const crashed = await request('crash');
+  assert.match(crashed.error.message, /stopped before answering/);
+  const fourth = (await request('tools/call')).result;
+  assert.notEqual(fourth.pid, third);
+  assert.equal(fourth.initialized, true);
+  void hanging;
+
+  input.end();
+  assert.equal(await done, 0);
 });

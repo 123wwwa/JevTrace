@@ -13,6 +13,8 @@ import { clientsGuide, configuredProvider, runSetup } from './setup.js';
 import { explainError, UserFacingError } from './errors.js';
 import { unsuitableRoot } from './fs-walk.js';
 import { version } from './version.js';
+import { superviseStdio } from './supervisor.js';
+import { userConfigStamp } from './user-config.js';
 
 const help = [
   `jevtrace ${version}: an MCP server that hands coding agents the JS/TS code a task needs.`,
@@ -212,10 +214,22 @@ if (retrieving) {
     process.stderr.write(`${explainError(error)}\n`);
     process.exitCode = 1;
   }
+} else if (process.env.JEVTRACE_WORKER === '1') {
+  // The server itself, started by the supervisor below (or directly, with JEVTRACE_WORKER=1, to debug it).
+  serveStdio(() => createServer(root));
 } else {
   // MCP hosts show stderr in their logs; tool calls report the same with the fix.
   if (!configuredProvider()) process.stderr.write('jevtrace: no decision provider is configured; run `npx -y jevtrace setup` in a terminal\n');
   // The server still starts, so the agent can show this message as the tool's answer; the log gets it too.
   if (unsuitable) process.stderr.write(`jevtrace: ${unsuitable}\n`);
-  serveStdio(() => createServer(root));
+  // The server runs as a child of this process, which keeps the host's connection: when `jevtrace setup` saves
+  // a new key or provider, the next call restarts the server with it, and the agent keeps its session.
+  const code = await superviseStdio({
+    command: process.execPath,
+    args: [...process.execArgv, process.argv[1], ...args],
+    env: { ...process.env, JEVTRACE_WORKER: '1' },
+    stamp: () => userConfigStamp(),
+    log: message => process.stderr.write(`jevtrace: ${message}\n`),
+  });
+  process.exit(code);
 }

@@ -210,6 +210,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<UserConfig> 
       // The npx form, not this script's path: under npx that path is a cache directory that can disappear.
       output.write([
         `Saved to ${file}. Environment variables (${choice.spec?.keyEnv ?? 'JEVTRACE_API_KEY'}, JEVTRACE_PROVIDER) still override it.`,
+        'A JevTrace MCP server that is already running restarts with it on its next call; the agent keeps its session.',
         '',
         'Next:',
         '  Claude Code:     claude mcp add jevtrace --scope user -- npx -y jevtrace',
